@@ -2,10 +2,10 @@
 # -*- coding: utf-8 -*-
 
 """
-Ouster 라이다 웹 제어 대시보드
-- 센서 상태 확인
-- 데이터 녹화 시작/중지
-- 녹화된 데이터 재생
+Ouster 라이다 웹 제어 대시보드 (개선 버전)
+- ROS2 노드를 Flask 내부에 직접 통합
+- 실시간 이미지 캡처 (subprocess 없음)
+- 백그라운드에서 지속적으로 토픽 구독
 """
 
 import os
@@ -21,9 +21,24 @@ from flask import Flask, render_template, jsonify, request
 from flask_cors import CORS
 import psutil
 
+# ROS2 imports
+import rclpy
+from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
+from sensor_msgs.msg import Image as RosImage
+import numpy as np
+import cv2
+import base64
+from io import BytesIO
+from PIL import Image as PILImage
+
 # 메타데이터 매니저 import
 sys.path.append(str(Path(__file__).parent.parent / 'scripts' / 'metadata'))
-from metadata_manager import RosbagMetadata
+try:
+    from metadata_manager import RosbagMetadata
+except ImportError:
+    print("Warning: metadata_manager not found")
+    RosbagMetadata = None
 
 app = Flask(__name__)
 CORS(app)
@@ -34,14 +49,12 @@ SCRIPTS_DIR = BASE_DIR / 'scripts'
 DATA_DIR = Path('/home/kimghw/glim/rosbag_data')
 SENSOR_IP = '192.168.10.10'
 ROS_SETUP = '/opt/ros/jazzy/setup.bash'
-ROS_PYTHON = '/opt/ros/jazzy/bin/python3'
 
 # 전역 프로세스 관리
 recording_process = None
 driver_process = None
 replay_process = None
-CAPTURE_JSON_PATH = Path('/tmp/latest_capture.json')
-CAPTURE_LOCK = threading.Lock()
+capture_node = None  # ROS2 캡처 노드
 RUNNING_STATUSES = {
     psutil.STATUS_RUNNING,
     psutil.STATUS_SLEEPING,
@@ -49,6 +62,119 @@ RUNNING_STATUSES = {
     getattr(psutil, "STATUS_WAKING", "waking"),
     getattr(psutil, "STATUS_IDLE", "idle"),
 }
+
+
+# ============================================
+# ROS2 Image Capture Node (백그라운드 상시 실행)
+# ============================================
+
+class ImageCaptureNode(Node):
+    """실시간 이미지 캡처를 위한 ROS2 노드"""
+
+    def __init__(self):
+        super().__init__('web_image_capture')
+
+        self.latest_image = None
+        self.latest_timestamp = None
+        self.lock = threading.Lock()
+        self.message_count = 0
+
+        # QoS 설정 (Best Effort - bag 재생과 호환)
+        qos = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=10
+        )
+
+        # Near-IR 이미지 구독
+        self.subscription = self.create_subscription(
+            RosImage,
+            '/ouster/nearir_image',
+            self.image_callback,
+            qos
+        )
+
+        self.get_logger().info('Image capture node initialized')
+
+    def image_callback(self, msg):
+        """토픽 메시지 수신 시 자동 호출"""
+        try:
+            # ROS Image (mono16) → numpy array
+            height = msg.height
+            width = msg.width
+            img_array = np.frombuffer(msg.data, dtype=np.uint16).reshape(height, width)
+
+            # 정규화 (16bit → 8bit)
+            img_normalized = cv2.normalize(img_array, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
+
+            # 컬러맵 적용 (시각화)
+            img_colored = cv2.applyColorMap(img_normalized, cv2.COLORMAP_JET)
+
+            # 리사이즈 (웹 표시용)
+            display_height = 512
+            display_width = int(width * display_height / height)
+            img_resized = cv2.resize(img_colored, (display_width, display_height), interpolation=cv2.INTER_LINEAR)
+
+            # 라벨 추가
+            cv2.putText(img_resized, 'NEAR-IR IMAGE', (10, 20),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+
+            # PIL Image로 변환
+            pil_img = PILImage.fromarray(cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB))
+
+            # JPEG로 압축하여 Base64 인코딩
+            buffer = BytesIO()
+            pil_img.save(buffer, format='JPEG', quality=85)
+            img_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+
+            # 스레드 안전하게 저장
+            with self.lock:
+                self.latest_image = img_base64
+                self.latest_timestamp = datetime.now()
+                self.message_count += 1
+
+            if self.message_count % 10 == 0:
+                self.get_logger().info(f'Captured {self.message_count} images')
+
+        except Exception as e:
+            self.get_logger().error(f'Image processing error: {e}')
+
+    def get_latest_image(self):
+        """최신 이미지 반환"""
+        with self.lock:
+            if self.latest_image is None:
+                return None, None
+            return self.latest_image, self.latest_timestamp
+
+
+def start_ros_capture_node():
+    """백그라운드에서 ROS2 캡처 노드 시작"""
+    global capture_node
+
+    try:
+        # ROS2 초기화 (단 1회)
+        if not rclpy.ok():
+            rclpy.init()
+
+        # 캡처 노드 생성
+        capture_node = ImageCaptureNode()
+
+        # 백그라운드 스레드에서 계속 실행
+        def spin_thread():
+            try:
+                rclpy.spin(capture_node)
+            except Exception as e:
+                print(f"ROS spin error: {e}")
+
+        thread = threading.Thread(target=spin_thread, daemon=True)
+        thread.start()
+
+        print("✅ ROS2 캡처 노드가 백그라운드에서 시작되었습니다.")
+        return True
+
+    except Exception as e:
+        print(f"❌ ROS2 노드 시작 실패: {e}")
+        return False
 
 
 def run_command(cmd, background=False, timeout=10, clear_venv=False):
@@ -554,75 +680,46 @@ def start_replay():
 
 @app.route('/api/capture', methods=['GET'])
 def capture_pointcloud():
-    """Near-IR 이미지 캡처"""
-    if not CAPTURE_LOCK.acquire(blocking=False):
-        return jsonify({'success': False, 'message': '다른 캡처 작업이 진행 중입니다. 잠시 후 다시 시도하세요.'})
+    """
+    Near-IR 이미지 캡처 (개선된 버전)
+    - subprocess 없음
+    - 백그라운드 ROS2 노드에서 즉시 반환
+    """
+    global capture_node
 
-    try:
-        # 드라이버가 실행 중인지만 확인 (녹화 여부와 무관하게)
-        topics = check_ros_topics()
-        if not topics['available'] or topics['count'] == 0:
-            return jsonify({
-                'success': False,
-                'message': '라이다 토픽을 찾을 수 없습니다. "Start Recording"을 누르면 드라이버가 자동으로 시작됩니다.'
-            })
-
-        # 이전 결과 파일 삭제 (stale 데이터 방지)
-        try:
-            if CAPTURE_JSON_PATH.exists():
-                CAPTURE_JSON_PATH.unlink()
-        except Exception:
-            pass
-
-        # 캡처 스크립트 실행 (ROS2 환경 소싱 필요)
-        # 가상환경 비활성화 후 ROS2 환경만 사용
-        script_path = SCRIPTS_DIR / 'capture' / 'capture_pointcloud.py'
-        cmd = f'bash -c "source {ROS_SETUP} && timeout 15 python3 {script_path}"'
-        result = run_command(cmd, timeout=20, clear_venv=True)
-
-        # 결과 확인
-        if not result:
-            return jsonify({'success': False, 'message': '캡처 실행에 실패했습니다.'})
-
-        # JSON 파일이 생성되었는지 확인
-        time.sleep(0.5)  # 파일 생성 대기
-
-        if not CAPTURE_JSON_PATH.exists():
-            # 상세 오류 제공
-            stderr_msg = (result.stderr or '').strip() if hasattr(result, 'stderr') else ''
-            stdout_msg = (result.stdout or '').strip() if hasattr(result, 'stdout') else ''
-            diag = stderr_msg or stdout_msg or '캡처 스크립트가 정상적으로 종료되지 않았습니다.'
-
-            # 전체 에러 메시지 로깅
-            print(f"=== CAPTURE ERROR DEBUG ===")
-            print(f"STDERR: {stderr_msg}")
-            print(f"STDOUT: {stdout_msg}")
-            print(f"RETURNCODE: {getattr(result, 'returncode', None)}")
-            print(f"==========================")
-
-            return jsonify({
-                'success': False,
-                'message': f'캡처 실패: {diag[:500]}',
-                'returncode': getattr(result, 'returncode', None),
-                'stderr': stderr_msg[:500],
-                'stdout': stdout_msg[:500]
-            })
-
-        with open(CAPTURE_JSON_PATH, 'r') as f:
-            img_dict = json.load(f)
-
-        capture_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-
+    # 1. ROS2 노드 확인
+    if capture_node is None:
         return jsonify({
-            'success': True,
-            'message': f'Near-IR 이미지를 캡처했습니다. ({capture_time})',
-            'image': f'data:image/png;base64,{img_dict["nearir"]}',
-            'timestamp': capture_time
+            'success': False,
+            'message': 'ROS2 캡처 노드가 초기화되지 않았습니다. 서버를 재시작해주세요.'
         })
-    except Exception as e:
-        return jsonify({'success': False, 'message': f'오류: {str(e)}'})
-    finally:
-        CAPTURE_LOCK.release()
+
+    # 2. 토픽 확인 (드라이버 실행 여부)
+    topics = check_ros_topics()
+    if not topics['available'] or topics['count'] == 0:
+        return jsonify({
+            'success': False,
+            'message': '라이다 토픽을 찾을 수 없습니다. 드라이버를 시작해주세요.'
+        })
+
+    # 3. 메모리에서 최신 이미지 가져오기
+    img_base64, timestamp = capture_node.get_latest_image()
+
+    if img_base64 is None:
+        return jsonify({
+            'success': False,
+            'message': '아직 이미지를 받지 못했습니다. 잠시 후 다시 시도해주세요.'
+        })
+
+    # 4. 즉시 반환 (처리 시간 ~0.01초)
+    capture_time = timestamp.strftime('%Y-%m-%d %H:%M:%S') if timestamp else datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+    return jsonify({
+        'success': True,
+        'message': f'Near-IR 이미지를 캡처했습니다. ({capture_time})',
+        'image': f'data:image/jpeg;base64,{img_base64}',
+        'timestamp': capture_time
+    })
 
 
 @app.route('/api/replay/stop', methods=['POST'])
@@ -710,6 +807,9 @@ def delete_file():
 @app.route('/api/metadata/<bag_name>', methods=['GET'])
 def get_metadata(bag_name):
     """bag 파일의 메타데이터 조회"""
+    if not RosbagMetadata:
+        return jsonify({'success': False, 'message': 'Metadata manager not available'})
+
     try:
         bag_path = DATA_DIR / bag_name
         if not bag_path.exists():
@@ -754,6 +854,9 @@ def get_metadata(bag_name):
 @app.route('/api/metadata/<bag_name>', methods=['POST'])
 def update_metadata(bag_name):
     """bag 파일의 메타데이터 업데이트"""
+    if not RosbagMetadata:
+        return jsonify({'success': False, 'message': 'Metadata manager not available'})
+
     try:
         bag_path = DATA_DIR / bag_name
         if not bag_path.exists():
@@ -812,10 +915,25 @@ def update_metadata(bag_name):
 
 if __name__ == '__main__':
     print("=" * 60)
-    print("  Ouster 라이다 웹 대시보드")
+    print("  Ouster 라이다 웹 대시보드 (개선 버전)")
     print("=" * 60)
     print(f"  접속 주소: http://localhost:5001")
     print(f"  센서 IP: {SENSOR_IP}")
     print("=" * 60)
+    print()
 
-    app.run(host='0.0.0.0', port=5001, debug=True, use_reloader=False)
+    # ROS2 캡처 노드 시작
+    print("🚀 ROS2 캡처 노드 초기화 중...")
+    if start_ros_capture_node():
+        print("✅ ROS2 노드가 백그라운드에서 실행 중입니다.")
+        print("   → /ouster/nearir_image 토픽을 자동으로 구독합니다.")
+        print()
+    else:
+        print("⚠️  ROS2 노드 시작 실패. 캡처 기능이 제한될 수 있습니다.")
+        print()
+
+    print("🌐 Flask 웹 서버 시작 중...")
+    print()
+
+    # Flask 서버 실행 (debug=False로 설정 - ROS2와 함께 사용 시 필수)
+    app.run(host='0.0.0.0', port=5001, debug=False, use_reloader=False)
