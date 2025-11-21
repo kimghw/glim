@@ -1,0 +1,19 @@
+microstrain_inertial_driver:
+  ros__parameters:
+    port : '/dev/ttyACM0'
+    baudrate : 115200
+
+    # Convert NED to ENU for ROS2 standard
+    use_enu_frame : True
+
+    # Frame ID
+    frame_id : 'imu_link'
+
+    # Disable PPS (no PPS source available)
+    filter_pps_source : 0
+
+    # Filter configuration
+    filter_declination_source : 1
+
+    # Enable gyro bias estimation
+    filter_enable_gyro_bias_estimation : True
