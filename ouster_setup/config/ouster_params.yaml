@@ -1,0 +1,13 @@
+ouster/os_driver:
+  ros__parameters:
+    sensor_hostname: '192.168.10.10'  # 고정 IP로 설정된 Ouster 센서
+    lidar_mode: '2048x10'
+    timestamp_mode: 'TIME_FROM_INTERNAL_OSC'
+    lidar_port: 7502
+    imu_port: 7503
+    sensor_frame: os_sensor
+    lidar_frame: os_lidar
+    imu_frame: os_imu
+    point_cloud_frame: os_lidar
+    proc_mask: IMG|PCL|IMU|SCAN
+    use_system_default_qos: false

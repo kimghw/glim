@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>캡처 테스트</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            padding: 20px;
+            background: #f0f0f0;
+        }
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        button {
+            padding: 10px 20px;
+            background: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        button:hover {
+            background: #45a049;
+        }
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        #status {
+            margin: 20px 0;
+            padding: 10px;
+            border-radius: 5px;
+        }
+        .success {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        .error {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        #captured-image {
+            max-width: 100%;
+            margin: 20px 0;
+            border: 2px solid #ddd;
+            border-radius: 5px;
+        }
+        .loading {
+            color: #666;
+            font-style: italic;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎯 포인트 클라우드 캡처 테스트</h1>
+
+        <div>
+            <h3>상태 확인</h3>
+            <button onclick="checkStatus()">상태 확인</button>
+            <div id="system-status"></div>
+        </div>
+
+        <hr style="margin: 20px 0;">
+
+        <div>
+            <h3>캡처 테스트</h3>
+            <p>녹화 중일 때만 캡처가 가능합니다.</p>
+            <button id="capture-btn" onclick="captureImage()">📸 캡처하기</button>
+            <div id="status"></div>
+            <img id="captured-image" style="display: none;">
+            <div id="capture-info"></div>
+        </div>
+    </div>
+
+    <script>
+        async function checkStatus() {
+            try {
+                const response = await fetch('http://localhost:5001/api/status');
+                const data = await response.json();
+
+                const statusDiv = document.getElementById('system-status');
+                statusDiv.innerHTML = `
+                    <div style="margin-top: 10px; padding: 10px; background: #f9f9f9; border-radius: 5px;">
+                        <p><strong>센서:</strong> ${data.sensor.status}</p>
+                        <p><strong>녹화:</strong> ${data.recording.active ? '녹화 중 ✅' : '중지됨 ❌'}</p>
+                        <p><strong>토픽:</strong> ${data.ros_topics.count}개</p>
+                    </div>
+                `;
+
+                // 녹화 중이 아니면 캡처 버튼 비활성화
+                document.getElementById('capture-btn').disabled = !data.recording.active;
+
+            } catch (error) {
+                document.getElementById('system-status').innerHTML =
+                    `<div class="error">상태 확인 실패: ${error.message}</div>`;
+            }
+        }
+
+        async function captureImage() {
+            const btn = document.getElementById('capture-btn');
+            const statusDiv = document.getElementById('status');
+            const img = document.getElementById('captured-image');
+            const infoDiv = document.getElementById('capture-info');
+
+            btn.disabled = true;
+            statusDiv.innerHTML = '<div class="loading">캡처 중... 잠시만 기다려주세요.</div>';
+            img.style.display = 'none';
+
+            try {
+                const response = await fetch('http://localhost:5001/api/capture');
+                const data = await response.json();
+
+                if (data.success) {
+                    statusDiv.innerHTML = `<div class="success">${data.message}</div>`;
+
+                    if (data.image) {
+                        img.src = data.image;
+                        img.style.display = 'block';
+                        infoDiv.innerHTML = `<p>캡처 시간: ${data.timestamp || '알 수 없음'}</p>`;
+                    } else {
+                        statusDiv.innerHTML += '<div class="error">이미지 데이터가 없습니다.</div>';
+                    }
+                } else {
+                    statusDiv.innerHTML = `<div class="error">${data.message}</div>`;
+                }
+            } catch (error) {
+                statusDiv.innerHTML = `<div class="error">캡처 실패: ${error.message}</div>`;
+            } finally {
+                btn.disabled = false;
+            }
+        }
+
+        // 페이지 로드 시 상태 확인
+        window.onload = () => {
+            checkStatus();
+            // 3초마다 상태 업데이트
+            setInterval(checkStatus, 3000);
+        };
+    </script>
+</body>
+</html>

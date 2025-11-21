@@ -1,0 +1,4 @@
+.venv
+*.pyc
+ouster_setup/web/venv
+rosbag_data

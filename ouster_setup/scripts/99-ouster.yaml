@@ -1,0 +1,7 @@
+network:
+  version: 2
+  ethernets:
+    enxf8e43b49701e:
+      addresses:
+        - 192.168.10.1/24
+      optional: true
