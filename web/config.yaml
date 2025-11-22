@@ -1,0 +1,30 @@
+# Rosbag Recording Configuration
+
+# Directory where rosbag files will be saved
+rosbag_dir: "/home/kimghw/glim/rosbag_data"
+
+# Topics to record
+# Comment out or remove topics you don't want to record
+topics:
+  # IMU topics
+  - "/imu/data"
+  - "/imu/data_raw"
+  - "/ekf/status"
+  - "/tf"
+
+  # Ouster LiDAR topics (uncomment when Ouster is running)
+  # - "/ouster/points"
+  # - "/ouster/imu"
+  # - "/ouster/scan"
+
+  # Additional topics (add as needed)
+  # - "/tf"
+  # - "/tf_static"
+
+# Recording options
+recording:
+  # Maximum bag file size in bytes (0 = no limit)
+  max_bag_size: 0
+
+  # Compression (none, zstd, lz4)
+  compression: "none"
