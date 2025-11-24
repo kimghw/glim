@@ -18,10 +18,14 @@ from pathlib import Path
 import rclpy
 from rclpy.node import Node
 from rclpy.executors import MultiThreadedExecutor
-from sensor_msgs.msg import Imu
+from sensor_msgs.msg import Imu, Image
 from nav_msgs.msg import Odometry
 from std_msgs.msg import String
 import rosidl_runtime_py.utilities
+from cv_bridge import CvBridge
+import cv2
+import base64
+import numpy as np
 
 app = Flask(__name__)
 
@@ -59,6 +63,7 @@ class TopicMonitor(Node):
         self.latest_messages = {}  # Store latest message for each topic
         self.message_timestamps = {}  # Store timestamp of last message
         self.topic_subscriptions = {}  # Store subscription objects
+        self.cv_bridge = CvBridge()  # For converting ROS images to OpenCV
         self.get_logger().info('Topic Monitor Node initialized')
 
     def subscribe_to_topic(self, topic_name, msg_type):
@@ -68,15 +73,25 @@ class TopicMonitor(Node):
             return
 
         try:
-            # Create subscription
+            from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
+
+            # Use BEST_EFFORT for sensor topics (especially images and point clouds)
+            qos_profile = QoSProfile(
+                reliability=ReliabilityPolicy.BEST_EFFORT,
+                history=HistoryPolicy.KEEP_LAST,
+                depth=10,
+                durability=DurabilityPolicy.VOLATILE
+            )
+
+            # Create subscription with BEST_EFFORT QoS
             sub = self.create_subscription(
                 msg_type,
                 topic_name,
                 lambda msg, topic=topic_name: self._topic_callback(topic, msg),
-                10
+                qos_profile
             )
             self.topic_subscriptions[topic_name] = sub
-            self.get_logger().info(f'Subscribed to {topic_name}')
+            self.get_logger().info(f'Subscribed to {topic_name} with BEST_EFFORT QoS')
         except Exception as e:
             self.get_logger().error(f'Failed to subscribe to {topic_name}: {e}')
 
@@ -102,6 +117,10 @@ class TopicMonitor(Node):
     def _msg_to_dict(self, msg):
         """Convert ROS message to dictionary"""
         try:
+            # Check if this is an Image message
+            if hasattr(msg, 'encoding') and hasattr(msg, 'data'):
+                return self._image_to_dict(msg)
+
             # Simple conversion - expand this as needed
             msg_dict = {}
             for field in msg.get_fields_and_field_types():
@@ -119,6 +138,47 @@ class TopicMonitor(Node):
             return msg_dict
         except Exception as e:
             return {'error': f'Failed to convert message: {e}', 'raw': str(msg)}
+
+    def _image_to_dict(self, img_msg):
+        """Convert ROS Image message to dictionary with base64 encoded image"""
+        try:
+            # Convert ROS Image to OpenCV format
+            cv_image = self.cv_bridge.imgmsg_to_cv2(img_msg, desired_encoding='passthrough')
+
+            # Normalize image for visualization
+            if img_msg.encoding in ['16UC1', '32FC1']:
+                # For depth/range images, normalize to 8-bit
+                cv_image_normalized = cv2.normalize(cv_image, None, 0, 255, cv2.NORM_MINMAX)
+                cv_image_8bit = cv_image_normalized.astype(np.uint8)
+            elif img_msg.encoding == 'mono8':
+                cv_image_8bit = cv_image
+            else:
+                # Try to convert to grayscale
+                if len(cv_image.shape) == 3:
+                    cv_image_8bit = cv2.cvtColor(cv_image, cv2.COLOR_BGR2GRAY)
+                else:
+                    cv_image_8bit = cv_image
+
+            # Encode as JPEG
+            _, buffer = cv2.imencode('.jpg', cv_image_8bit)
+            img_base64 = base64.b64encode(buffer).decode('utf-8')
+
+            return {
+                'type': 'image',
+                'encoding': img_msg.encoding,
+                'height': img_msg.height,
+                'width': img_msg.width,
+                'image_data': img_base64
+            }
+        except Exception as e:
+            self.get_logger().error(f'Failed to convert image: {e}')
+            return {
+                'type': 'image',
+                'error': str(e),
+                'encoding': img_msg.encoding,
+                'height': img_msg.height,
+                'width': img_msg.width
+            }
 
 # Global ROS2 node and executor
 ros_node = None
@@ -532,11 +592,13 @@ def subscribe_topic():
         # Parse message type
         if msg_type_str == 'sensor_msgs/msg/Imu':
             msg_type = Imu
+        elif msg_type_str == 'sensor_msgs/msg/Image':
+            msg_type = Image
         else:
             # Try to dynamically load the message type
             return jsonify({
                 "success": False,
-                "error": f"Message type '{msg_type_str}' not supported yet. Use 'sensor_msgs/msg/Imu'"
+                "error": f"Message type '{msg_type_str}' not supported yet. Use 'sensor_msgs/msg/Imu' or 'sensor_msgs/msg/Image'"
             }), 400
 
         ros_node.subscribe_to_topic(topic, msg_type)
@@ -624,8 +686,8 @@ def driver_status():
                 # Check if IMU topics exist
                 imu_topics_active = '/imu/data' in available_topics or '/imu/data_raw' in available_topics
 
-                # Check if Ouster topics exist
-                ouster_topics_active = '/ouster/points' in available_topics or '/ouster/imu' in available_topics
+                # Check if Ouster topics exist (check for any ouster topic)
+                ouster_topics_active = any('ouster' in topic for topic in available_topics)
 
         except subprocess.TimeoutExpired:
             # If timeout, assume topics are not available
@@ -809,6 +871,12 @@ def init_ros2():
     # Auto-subscribe to common topics
     ros_node.subscribe_to_topic('/imu/data', Imu)
     ros_node.subscribe_to_topic('/imu/data_raw', Imu)
+
+    # Auto-subscribe to Ouster image topics
+    ros_node.subscribe_to_topic('/ouster/nearir_image', Image)
+    ros_node.subscribe_to_topic('/ouster/range_image', Image)
+    ros_node.subscribe_to_topic('/ouster/reflec_image', Image)
+    ros_node.subscribe_to_topic('/ouster/signal_image', Image)
 
     # Create executor and spin in separate thread
     ros_executor = MultiThreadedExecutor()

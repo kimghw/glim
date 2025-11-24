@@ -198,8 +198,8 @@
             padding: 15px;
             border-radius: 8px;
             margin-top: 15px;
-            max-height: 400px;
-            overflow-y: auto;
+            max-height: 600px;
+            overflow: auto;
         }
 
         .data-display pre {
@@ -472,14 +472,24 @@
                 <h2>📊 Real-time Topic Data</h2>
                 <div class="input-group">
                     <label>Select Topic</label>
-                    <select id="topic-select" style="width: 100%; padding: 10px; border: 2px solid #e2e8f0; border-radius: 6px;">
-                        <option value="/imu/data">/imu/data</option>
-                        <option value="/imu/data_raw">/imu/data_raw</option>
-                        <option value="/ekf/status">/ekf/status</option>
-                        <option value="/tf">/tf</option>
+                    <select id="topic-select" style="width: 100%; padding: 10px; border: 2px solid #e2e8f0; border-radius: 6px;" onchange="onTopicSelectionChange()">
+                        <optgroup label="IMU Topics">
+                            <option value="/imu/data">/imu/data</option>
+                            <option value="/imu/data_raw">/imu/data_raw</option>
+                        </optgroup>
+                        <optgroup label="Ouster Images">
+                            <option value="/ouster/nearir_image">/ouster/nearir_image</option>
+                            <option value="/ouster/range_image">/ouster/range_image</option>
+                            <option value="/ouster/reflec_image">/ouster/reflec_image</option>
+                            <option value="/ouster/signal_image">/ouster/signal_image</option>
+                        </optgroup>
+                        <optgroup label="Other">
+                            <option value="/ekf/status">/ekf/status</option>
+                            <option value="/tf">/tf</option>
+                        </optgroup>
                     </select>
                 </div>
-                <button class="btn-primary" onclick="fetchTopicData()">
+                <button class="btn-primary" onclick="subscribeAndFetch()">
                     🔄 Fetch Data
                 </button>
                 <button class="btn-success" onclick="toggleAutoRefresh()">
@@ -803,9 +813,45 @@
             }
         }
 
+        function onTopicSelectionChange() {
+            // Stop auto-refresh when changing topics
+            if (isAutoRefreshing) {
+                toggleAutoRefresh();
+            }
+        }
+
+        async function subscribeAndFetch() {
+            const topic = document.getElementById('topic-select').value;
+
+            // Check if it's an image topic
+            const isImageTopic = topic.includes('/image') || topic.includes('_image');
+
+            if (isImageTopic) {
+                // Subscribe to image topic first
+                try {
+                    await fetch('/api/topics/subscribe', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            topic: topic,
+                            msg_type: 'sensor_msgs/msg/Image'
+                        })
+                    });
+                    // Wait a bit for subscription to take effect
+                    await new Promise(resolve => setTimeout(resolve, 500));
+                } catch (error) {
+                    console.error('Failed to subscribe:', error);
+                }
+            }
+
+            fetchTopicData();
+        }
+
         async function fetchTopicData() {
             const topic = document.getElementById('topic-select').value;
             const display = document.getElementById('topic-data');
+
+            display.innerHTML = '<pre style="color: #718096;">Loading...</pre>';
 
             try {
                 const response = await fetch('/api/topics/echo', {
@@ -815,14 +861,48 @@
                 });
                 const data = await response.json();
 
+                console.log('Received data:', data);
+
                 if (data.success) {
-                    display.innerHTML = '<pre>' + JSON.stringify(data.data, null, 2) + '</pre>' +
-                                       '<p style="color: #718096; margin-top: 10px; font-size: 0.85em;">Last updated: ' +
-                                       new Date().toLocaleTimeString() + ' (age: ' + data.age_seconds.toFixed(3) + 's)</p>';
+                    // Check if it's image data
+                    if (data.data && data.data.type === 'image') {
+                        console.log('Image data detected, has image_data:', !!data.data.image_data);
+                        if (data.data.image_data) {
+                            const imgDataLength = data.data.image_data.length;
+                            console.log('Image data length:', imgDataLength);
+
+                            // Calculate display dimensions
+                            const scaleHeight = 8; // Scale height 2x (from 4 to 8)
+                            const scaleWidth = 0.25; // Compress width to 1/4
+                            const displayHeight = data.data.height * scaleHeight;
+                            const displayWidth = data.data.width * scaleWidth;
+
+                            display.innerHTML =
+                                '<div style="overflow: auto; max-height: 550px; background: #000;">' +
+                                '<img src="data:image/jpeg;base64,' + data.data.image_data + '" ' +
+                                'style="width: ' + displayWidth + 'px; height: ' + displayHeight + 'px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); display: block; image-rendering: auto;" ' +
+                                'onerror="this.style.display=\'none\'; this.nextElementSibling.style.display=\'block\';">' +
+                                '<p style="color: #e53e3e; display: none;">Failed to load image</p>' +
+                                '</div>' +
+                                '<p style="color: #718096; margin-top: 10px; font-size: 0.85em; text-align: center;">' +
+                                data.data.width + 'x' + data.data.height + ' → ' + Math.round(displayWidth) + 'x' + displayHeight + ' | ' + data.data.encoding +
+                                '<br>Last updated: ' + new Date().toLocaleTimeString() +
+                                ' (age: ' + data.age_seconds.toFixed(3) + 's)</p>';
+                        } else {
+                            const errorMsg = data.data.error || 'No image data available';
+                            display.innerHTML = '<pre style="color: #e53e3e;">Error: ' + errorMsg + '</pre>';
+                        }
+                    } else {
+                        // Regular JSON data
+                        display.innerHTML = '<pre>' + JSON.stringify(data.data, null, 2) + '</pre>' +
+                                           '<p style="color: #718096; margin-top: 10px; font-size: 0.85em;">Last updated: ' +
+                                           new Date().toLocaleTimeString() + ' (age: ' + data.age_seconds.toFixed(3) + 's)</p>';
+                    }
                 } else {
                     display.innerHTML = '<pre style="color: #e53e3e;">Error: ' + data.error + '</pre>';
                 }
             } catch (error) {
+                console.error('Fetch error:', error);
                 display.innerHTML = '<pre style="color: #e53e3e;">Failed to fetch data: ' + error.message + '</pre>';
             }
         }
