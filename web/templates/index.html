@@ -407,24 +407,20 @@
                 <button class="btn-primary" onclick="checkDriverStatus()">
                     🔄 Refresh Status
                 </button>
-            </div>
 
-            <!-- IMU Gyro Calibration -->
-            <div class="card">
-                <h2>🎯 IMU Gyro Calibration</h2>
-                <div class="status">
-                    <div class="status-indicator" id="imu-status"></div>
-                    <span id="imu-status-text">Checking...</span>
+                <!-- IMU Gyro Calibration Section -->
+                <div style="margin-top: 20px; padding-top: 20px; border-top: 2px solid #e2e8f0;">
+                    <h3 style="color: #4a5568; margin-bottom: 15px; font-size: 1.2em;">🎯 IMU Gyro Calibration</h3>
+                    <div class="message" id="calibration-message"></div>
+                    <p style="color: #718096; margin-bottom: 15px; font-size: 0.85em;">
+                        ⚠️ IMU must be completely still during calibration (10 seconds)
+                    </p>
+                    <button class="btn-success" id="calibrate-btn" onclick="calibrateGyro()">
+                        🔧 Calibrate Gyro Bias
+                    </button>
+                    <div class="spinner" id="calibration-spinner"></div>
+                    <div id="bias-display"></div>
                 </div>
-                <div class="message" id="calibration-message"></div>
-                <p style="color: #718096; margin-bottom: 15px; font-size: 0.9em;">
-                    ⚠️ IMU must be completely still during calibration (10 seconds)
-                </p>
-                <button class="btn-success" id="calibrate-btn" onclick="calibrateGyro()">
-                    🔧 Calibrate Gyro Bias
-                </button>
-                <div class="spinner" id="calibration-spinner"></div>
-                <div id="bias-display"></div>
             </div>
 
             <!-- Rosbag Recording -->
@@ -649,30 +645,23 @@
                     // Update IMU status
                     const imuStatus = document.getElementById('imu-driver-status');
                     const imuText = document.getElementById('imu-driver-text');
-                    const imuStatusIndicator = document.getElementById('imu-status');
                     const calibrateBtn = document.getElementById('calibrate-btn');
 
                     if (data.drivers.imu.status === 'active') {
                         imuStatus.classList.add('active');
                         imuText.textContent = 'Active';
                         imuText.style.color = '#48bb78';
-                        imuStatusIndicator.classList.add('active');
-                        document.getElementById('imu-status-text').textContent = 'IMU Ready';
-                        calibrateBtn.disabled = false;
+                        if (calibrateBtn) calibrateBtn.disabled = false;
                     } else if (data.drivers.imu.status === 'started') {
                         imuStatus.classList.remove('active');
                         imuText.textContent = 'Started (No Data)';
                         imuText.style.color = '#ed8936';
-                        imuStatusIndicator.classList.remove('active');
-                        document.getElementById('imu-status-text').textContent = 'IMU Started (No Data)';
-                        calibrateBtn.disabled = true;
+                        if (calibrateBtn) calibrateBtn.disabled = true;
                     } else {
                         imuStatus.classList.remove('active');
                         imuText.textContent = 'Stopped';
                         imuText.style.color = '#cbd5e0';
-                        imuStatusIndicator.classList.remove('active');
-                        document.getElementById('imu-status-text').textContent = 'IMU Not Running';
-                        calibrateBtn.disabled = true;
+                        if (calibrateBtn) calibrateBtn.disabled = true;
                     }
 
                     // Update Ouster status
