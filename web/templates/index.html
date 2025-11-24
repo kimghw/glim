@@ -283,23 +283,35 @@
 
         .card .settings-btn {
             position: absolute !important;
-            top: 25px !important;
-            right: 25px !important;
-            background: transparent !important;
+            top: 20px !important;
+            right: 20px !important;
+            width: 32px !important;
+            height: 32px !important;
+            background: #f1f5f9 !important;
+            color: #64748b !important;
             border: none !important;
-            font-size: 1.3em !important;
             cursor: pointer !important;
-            padding: 8px !important;
-            border-radius: 50% !important;
+            padding: 0 !important;
+            border-radius: 8px !important;
             transition: all 0.2s !important;
-            opacity: 0.6 !important;
+            opacity: 1 !important;
             z-index: 10 !important;
+            margin: 0 !important;
+            display: flex !important;
+            align-items: center !important;
+            justify-content: center !important;
         }
 
         .card .settings-btn:hover {
-            background: rgba(0, 0, 0, 0.05) !important;
-            opacity: 1 !important;
-            transform: rotate(90deg) !important;
+            background: #e2e8f0 !important;
+            color: #334155 !important;
+            transform: none !important;
+        }
+
+        .card .settings-btn svg {
+            width: 20px;
+            height: 20px;
+            fill: currentColor;
         }
 
         .settings-panel {
@@ -367,6 +379,36 @@
         <h1>🚀 GLIM Sensor Control Panel</h1>
 
         <div class="grid">
+            <!-- Driver Status -->
+            <div class="card">
+                <h2>🔌 Driver Status</h2>
+                <div style="margin-bottom: 15px;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; padding: 12px; background: #f7fafc; border-radius: 8px; margin-bottom: 10px;">
+                        <div>
+                            <strong>Microstrain IMU</strong>
+                            <div style="font-size: 0.85em; color: #718096;">Driver & Topics</div>
+                        </div>
+                        <div style="text-align: right;">
+                            <div class="status-indicator" id="imu-driver-status" style="display: inline-block; margin-right: 5px;"></div>
+                            <span id="imu-driver-text" style="font-size: 0.9em;">Checking...</span>
+                        </div>
+                    </div>
+                    <div style="display: flex; justify-content: space-between; align-items: center; padding: 12px; background: #f7fafc; border-radius: 8px;">
+                        <div>
+                            <strong>Ouster LiDAR</strong>
+                            <div style="font-size: 0.85em; color: #718096;">Driver & Topics</div>
+                        </div>
+                        <div style="text-align: right;">
+                            <div class="status-indicator" id="ouster-driver-status" style="display: inline-block; margin-right: 5px;"></div>
+                            <span id="ouster-driver-text" style="font-size: 0.9em;">Checking...</span>
+                        </div>
+                    </div>
+                </div>
+                <button class="btn-primary" onclick="checkDriverStatus()">
+                    🔄 Refresh Status
+                </button>
+            </div>
+
             <!-- IMU Gyro Calibration -->
             <div class="card">
                 <h2>🎯 IMU Gyro Calibration</h2>
@@ -378,7 +420,7 @@
                 <p style="color: #718096; margin-bottom: 15px; font-size: 0.9em;">
                     ⚠️ IMU must be completely still during calibration (10 seconds)
                 </p>
-                <button class="btn-success" onclick="calibrateGyro()">
+                <button class="btn-success" id="calibrate-btn" onclick="calibrateGyro()">
                     🔧 Calibrate Gyro Bias
                 </button>
                 <div class="spinner" id="calibration-spinner"></div>
@@ -387,15 +429,21 @@
 
             <!-- Rosbag Recording -->
             <div class="card">
-                <button class="settings-btn" onclick="toggleSettings()">⚙️</button>
                 <h2>📹 Rosbag Recording</h2>
+                <button class="settings-btn" onclick="toggleSettings()" title="Settings">
+                    <svg viewBox="0 0 24 24">
+                        <circle cx="12" cy="12" r="2"></circle>
+                        <circle cx="12" cy="5" r="2"></circle>
+                        <circle cx="12" cy="19" r="2"></circle>
+                    </svg>
+                </button>
 
-                <!-- Settings Panel -->
                 <div class="settings-panel" id="settings-panel">
-                    <h3 style="margin-bottom: 15px; color: #2d3748; font-size: 1.1em;">Select Topics to Record</h3>
-                    <div id="topics-checkboxes">
-                        <!-- Will be populated dynamically -->
-                    </div>
+                    <h3 style="margin-bottom: 10px; color: #4a5568;">Select Topics to Record</h3>
+                    <p style="color: #718096; font-size: 0.85em; margin-bottom: 10px;">
+                        ● Active topics only (drivers must be running)
+                    </p>
+                    <div id="topics-checkboxes"></div>
                     <button class="apply-btn" onclick="applyTopicSettings()">
                         ✓ Apply Settings
                     </button>
@@ -466,14 +514,24 @@
         // Check system status on load
         window.onload = function() {
             checkRecordingStatus();
-            checkIMUStatus();
+            checkDriverStatus();
             loadRecordings();
             loadAvailableTopics();
             loadCurrentTopics();
+
+            // Auto-refresh driver status every 5 seconds
+            setInterval(checkDriverStatus, 5000);
         };
 
-        function toggleSettings() {
+        async function toggleSettings() {
             const panel = document.getElementById('settings-panel');
+
+            // Refresh available topics when opening settings
+            if (!panel.classList.contains('show')) {
+                await loadAvailableTopics();
+                renderTopicCheckboxes();
+            }
+
             panel.classList.toggle('show');
         }
 
@@ -484,6 +542,10 @@
 
                 if (data.success) {
                     availableTopics = data.topics;
+                    // Auto-refresh the checkbox list when topics are loaded
+                    if (currentTopics.length > 0) {
+                        renderTopicCheckboxes();
+                    }
                 }
             } catch (error) {
                 console.error('Failed to load available topics:', error);
@@ -504,20 +566,31 @@
         function renderTopicCheckboxes() {
             const container = document.getElementById('topics-checkboxes');
 
-            // Combine current topics and available topics
-            const allTopics = [...new Set([...currentTopics, ...availableTopics])];
+            // Use only available topics (topics that are actually publishing)
+            if (availableTopics.length === 0) {
+                container.innerHTML = '<p style="color: #718096; padding: 10px; text-align: center;">No topics available. Start drivers first.</p>';
+                return;
+            }
 
-            container.innerHTML = allTopics.map(topic => `
+            container.innerHTML = availableTopics.map(topic => {
+                const isActive = availableTopics.includes(topic);
+                const isChecked = currentTopics.includes(topic);
+
+                return `
                 <div class="checkbox-group">
-                    <label>
+                    <label style="${!isActive ? 'opacity: 0.5;' : ''}">
                         <input type="checkbox"
                                value="${topic}"
-                               ${currentTopics.includes(topic) ? 'checked' : ''}
+                               ${isChecked ? 'checked' : ''}
+                               ${!isActive ? 'disabled' : ''}
                                onchange="updateTopicCount()">
-                        <span class="topic-info">${topic}</span>
+                        <span class="topic-info">
+                            ${topic}
+                            ${isActive ? '<span style="color: #48bb78; margin-left: 5px;">●</span>' : '<span style="color: #cbd5e0; margin-left: 5px;">○</span>'}
+                        </span>
                     </label>
                 </div>
-            `).join('');
+            `}).join('');
 
             updateTopicCount();
         }
@@ -557,14 +630,61 @@
             }
         }
 
-        async function checkIMUStatus() {
+        async function checkDriverStatus() {
             try {
-                const response = await fetch('/health');
+                const response = await fetch('/api/drivers/status');
                 const data = await response.json();
-                document.getElementById('imu-status').classList.add('active');
-                document.getElementById('imu-status-text').textContent = 'IMU Driver Running';
+
+                if (data.success) {
+                    // Update IMU status
+                    const imuStatus = document.getElementById('imu-driver-status');
+                    const imuText = document.getElementById('imu-driver-text');
+                    const imuStatusIndicator = document.getElementById('imu-status');
+                    const calibrateBtn = document.getElementById('calibrate-btn');
+
+                    if (data.drivers.imu.status === 'active') {
+                        imuStatus.classList.add('active');
+                        imuText.textContent = 'Active';
+                        imuText.style.color = '#48bb78';
+                        imuStatusIndicator.classList.add('active');
+                        document.getElementById('imu-status-text').textContent = 'IMU Ready';
+                        calibrateBtn.disabled = false;
+                    } else if (data.drivers.imu.status === 'started') {
+                        imuStatus.classList.remove('active');
+                        imuText.textContent = 'Started (No Data)';
+                        imuText.style.color = '#ed8936';
+                        imuStatusIndicator.classList.remove('active');
+                        document.getElementById('imu-status-text').textContent = 'IMU Started (No Data)';
+                        calibrateBtn.disabled = true;
+                    } else {
+                        imuStatus.classList.remove('active');
+                        imuText.textContent = 'Stopped';
+                        imuText.style.color = '#cbd5e0';
+                        imuStatusIndicator.classList.remove('active');
+                        document.getElementById('imu-status-text').textContent = 'IMU Not Running';
+                        calibrateBtn.disabled = true;
+                    }
+
+                    // Update Ouster status
+                    const ousterStatus = document.getElementById('ouster-driver-status');
+                    const ousterText = document.getElementById('ouster-driver-text');
+
+                    if (data.drivers.ouster.status === 'active') {
+                        ousterStatus.classList.add('active');
+                        ousterText.textContent = 'Active';
+                        ousterText.style.color = '#48bb78';
+                    } else if (data.drivers.ouster.status === 'started') {
+                        ousterStatus.classList.remove('active');
+                        ousterText.textContent = 'Started (No Data)';
+                        ousterText.style.color = '#ed8936';
+                    } else {
+                        ousterStatus.classList.remove('active');
+                        ousterText.textContent = 'Stopped';
+                        ousterText.style.color = '#cbd5e0';
+                    }
+                }
             } catch (error) {
-                document.getElementById('imu-status-text').textContent = 'IMU Driver Not Available';
+                console.error('Failed to check driver status:', error);
             }
         }
 

@@ -590,6 +590,69 @@ def list_available_topics():
             "error": str(e)
         }), 500
 
+@app.route('/api/drivers/status', methods=['GET'])
+def driver_status():
+    """Check status of IMU and Ouster drivers"""
+    try:
+        # Check Microstrain IMU driver
+        imu_running = subprocess.run(
+            ['pgrep', '-f', 'microstrain_inertial_driver_node'],
+            capture_output=True
+        ).returncode == 0
+
+        # Check Ouster driver
+        ouster_running = subprocess.run(
+            ['pgrep', '-f', 'os_driver'],
+            capture_output=True
+        ).returncode == 0
+
+        # Get list of available topics
+        imu_topics_active = False
+        ouster_topics_active = False
+
+        try:
+            result = subprocess.run(
+                ['bash', '-c', 'source /opt/ros/jazzy/setup.bash && source /home/kimghw/microstrain_ws/install/setup.bash && timeout 2 ros2 topic list'],
+                capture_output=True,
+                text=True,
+                timeout=3
+            )
+
+            if result.returncode == 0:
+                available_topics = result.stdout.strip().split('\n')
+
+                # Check if IMU topics exist
+                imu_topics_active = '/imu/data' in available_topics or '/imu/data_raw' in available_topics
+
+                # Check if Ouster topics exist
+                ouster_topics_active = '/ouster/points' in available_topics or '/ouster/imu' in available_topics
+
+        except subprocess.TimeoutExpired:
+            # If timeout, assume topics are not available
+            pass
+
+        return jsonify({
+            "success": True,
+            "drivers": {
+                "imu": {
+                    "running": imu_running,
+                    "publishing": imu_topics_active,
+                    "status": "active" if (imu_running and imu_topics_active) else ("started" if imu_running else "stopped")
+                },
+                "ouster": {
+                    "running": ouster_running,
+                    "publishing": ouster_topics_active,
+                    "status": "active" if (ouster_running and ouster_topics_active) else ("started" if ouster_running else "stopped")
+                }
+            }
+        })
+
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
 @app.route('/api/imu/calibrate_gyro', methods=['POST'])
 def calibrate_gyro():
     """Calibrate IMU gyro bias

@@ -10,16 +10,15 @@ topics:
   - "/imu/data"
   - "/imu/data_raw"
   - "/ekf/status"
+
+  # Ouster LiDAR topics
+  - "/ouster/points"
+  - "/ouster/imu"
+  - "/ouster/scan"
+
+  # Transform topics
   - "/tf"
-
-  # Ouster LiDAR topics (uncomment when Ouster is running)
-  # - "/ouster/points"
-  # - "/ouster/imu"
-  # - "/ouster/scan"
-
-  # Additional topics (add as needed)
-  # - "/tf"
-  # - "/tf_static"
+  - "/tf_static"
 
 # Recording options
 recording:
