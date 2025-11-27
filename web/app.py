@@ -3,7 +3,7 @@
 Flask web server for managing ROS2 rosbag recording
 """
 
-from flask import Flask, jsonify, request, render_template
+from flask import Flask, jsonify, request, render_template, Response
 import subprocess
 import os
 import signal
@@ -26,6 +26,9 @@ from cv_bridge import CvBridge
 import cv2
 import base64
 import numpy as np
+import time
+from collections import deque
+import math
 
 app = Flask(__name__)
 
@@ -64,7 +67,53 @@ class TopicMonitor(Node):
         self.message_timestamps = {}  # Store timestamp of last message
         self.topic_subscriptions = {}  # Store subscription objects
         self.cv_bridge = CvBridge()  # For converting ROS images to OpenCV
+
+        # IMU path integration variables
+        self.imu_path_enabled = False
+        self.imu_path_plane = 'xy'  # Default plane
+        self.imu_path_duration = 5.0  # seconds
+        self.imu_data_buffer = deque(maxlen=500)  # Buffer for IMU data (at 100Hz = 5 seconds)
+        self.imu_path = {'x': 0.0, 'y': 0.0, 'z': 0.0}  # Current position (meters)
+        self.imu_velocity = {'x': 0.0, 'y': 0.0, 'z': 0.0}  # Current velocity (m/s)
+        self.imu_path_history = deque(maxlen=500)  # Store path points
+        self.last_imu_time = None
+        self.imu_bias = {'x': 0.0, 'y': 0.0, 'z': 0.0}  # Bias offsets
+        self.imu_noise_std = {'x': 0.05, 'y': 0.05, 'z': 0.05}  # Default noise std
+        self.imu_calibrating = False
+        self.calibration_samples = []
+
+        # Accumulation buffer for fixed-rate integration
+        self.imu_acc_buffer = []  # Buffer to accumulate acceleration samples
+        self.last_integration_time = None  # Last time we performed integration
+        self.integration_interval = 0.1  # Integrate every 100ms (10Hz)
+
         self.get_logger().info('Topic Monitor Node initialized')
+
+    def quaternion_to_euler(self, x, y, z, w):
+        """Convert quaternion to euler angles (roll, pitch, yaw) in degrees"""
+        # Roll (x-axis rotation)
+        sinr_cosp = 2 * (w * x + y * z)
+        cosr_cosp = 1 - 2 * (x * x + y * y)
+        roll = math.atan2(sinr_cosp, cosr_cosp)
+
+        # Pitch (y-axis rotation)
+        sinp = 2 * (w * y - z * x)
+        if abs(sinp) >= 1:
+            pitch = math.copysign(math.pi / 2, sinp)
+        else:
+            pitch = math.asin(sinp)
+
+        # Yaw (z-axis rotation)
+        siny_cosp = 2 * (w * z + x * y)
+        cosy_cosp = 1 - 2 * (y * y + z * z)
+        yaw = math.atan2(siny_cosp, cosy_cosp)
+
+        # Convert to degrees
+        roll_deg = roll * 180.0 / math.pi
+        pitch_deg = pitch * 180.0 / math.pi
+        yaw_deg = yaw * 180.0 / math.pi
+
+        return roll_deg, pitch_deg, yaw_deg
 
     def subscribe_to_topic(self, topic_name, msg_type):
         """Subscribe to a topic dynamically"""
@@ -100,6 +149,10 @@ class TopicMonitor(Node):
         self.latest_messages[topic_name] = msg
         self.message_timestamps[topic_name] = self.get_clock().now()
 
+        # Process IMU data for path integration
+        if self.imu_path_enabled and topic_name == '/imu/data' and hasattr(msg, 'linear_acceleration'):
+            self._process_imu_for_path(msg)
+
     def get_latest_message(self, topic_name):
         """Get the latest message from a topic"""
         if topic_name not in self.latest_messages:
@@ -125,12 +178,21 @@ class TopicMonitor(Node):
             msg_dict = {}
             for field in msg.get_fields_and_field_types():
                 value = getattr(msg, field)
-                if hasattr(value, 'x') and hasattr(value, 'y') and hasattr(value, 'z'):
-                    # Vector3 type
-                    msg_dict[field] = {'x': value.x, 'y': value.y, 'z': value.z}
-                elif hasattr(value, 'w') and hasattr(value, 'x'):
+                # Check for Quaternion first (has w attribute)
+                if hasattr(value, 'w') and hasattr(value, 'x') and hasattr(value, 'y') and hasattr(value, 'z'):
                     # Quaternion type
                     msg_dict[field] = {'x': value.x, 'y': value.y, 'z': value.z, 'w': value.w}
+                    # Add euler angles for orientation field
+                    if field == 'orientation':
+                        roll, pitch, yaw = self.quaternion_to_euler(value.x, value.y, value.z, value.w)
+                        msg_dict['euler_angles'] = {
+                            'roll': round(roll, 2),
+                            'pitch': round(pitch, 2),
+                            'yaw': round(yaw, 2)
+                        }
+                elif hasattr(value, 'x') and hasattr(value, 'y') and hasattr(value, 'z'):
+                    # Vector3 type (no w attribute)
+                    msg_dict[field] = {'x': value.x, 'y': value.y, 'z': value.z}
                 elif isinstance(value, (int, float, str, bool)):
                     msg_dict[field] = value
                 else:
@@ -179,6 +241,236 @@ class TopicMonitor(Node):
                 'height': img_msg.height,
                 'width': img_msg.width
             }
+
+    def _process_imu_for_path(self, imu_msg):
+        """Process IMU data - accumulate in buffer for fixed-rate integration"""
+        current_time = time.time()
+
+        # Calibration mode - collect samples
+        if self.imu_calibrating:
+            if len(self.calibration_samples) < 100:  # Collect 100 samples (1 second at 100Hz)
+                # Get orientation quaternion
+                q = imu_msg.orientation
+                q_w, q_x, q_y, q_z = q.w, q.x, q.y, q.z
+
+                # Rotation matrix from quaternion
+                rot_matrix = np.array([
+                    [1 - 2*(q_y**2 + q_z**2), 2*(q_x*q_y - q_w*q_z), 2*(q_x*q_z + q_w*q_y)],
+                    [2*(q_x*q_y + q_w*q_z), 1 - 2*(q_x**2 + q_z**2), 2*(q_y*q_z - q_w*q_x)],
+                    [2*(q_x*q_z - q_w*q_y), 2*(q_y*q_z + q_w*q_x), 1 - 2*(q_x**2 + q_y**2)]
+                ])
+
+                # Rotate to world frame
+                acc_raw = np.array([
+                    imu_msg.linear_acceleration.x,
+                    imu_msg.linear_acceleration.y,
+                    imu_msg.linear_acceleration.z
+                ])
+                acc_world = rot_matrix @ acc_raw
+                acc_world[2] -= 9.81  # Remove gravity
+
+                self.calibration_samples.append(acc_world)
+
+                # Calculate bias when enough samples collected (increased to 200 samples ~ 2 seconds)
+                if len(self.calibration_samples) == 200:
+                    samples = np.array(self.calibration_samples)
+                    self.imu_bias['x'] = np.mean(samples[:, 0])
+                    self.imu_bias['y'] = np.mean(samples[:, 1])
+                    self.imu_bias['z'] = np.mean(samples[:, 2])
+
+                    # Also store the standard deviation for adaptive thresholding
+                    self.imu_noise_std = {
+                        'x': np.std(samples[:, 0]),
+                        'y': np.std(samples[:, 1]),
+                        'z': np.std(samples[:, 2])
+                    }
+
+                    self.imu_calibrating = False
+                    self.calibration_samples = []
+                    self.get_logger().info(f"IMU Bias Calibrated: X={self.imu_bias['x']:.4f}, Y={self.imu_bias['y']:.4f}, Z={self.imu_bias['z']:.4f}")
+                    self.get_logger().info(f"IMU Noise STD: X={self.imu_noise_std['x']:.4f}, Y={self.imu_noise_std['y']:.4f}, Z={self.imu_noise_std['z']:.4f}")
+            return
+
+        # Process acceleration and add to buffer
+        q = imu_msg.orientation
+        q_w, q_x, q_y, q_z = q.w, q.x, q.y, q.z
+
+        # Rotation matrix from quaternion
+        rot_matrix = np.array([
+            [1 - 2*(q_y**2 + q_z**2), 2*(q_x*q_y - q_w*q_z), 2*(q_x*q_z + q_w*q_y)],
+            [2*(q_x*q_y + q_w*q_z), 1 - 2*(q_x**2 + q_z**2), 2*(q_y*q_z - q_w*q_x)],
+            [2*(q_x*q_z - q_w*q_y), 2*(q_y*q_z + q_w*q_x), 1 - 2*(q_x**2 + q_y**2)]
+        ])
+
+        # Get raw acceleration
+        acc_raw = np.array([
+            imu_msg.linear_acceleration.x,
+            imu_msg.linear_acceleration.y,
+            imu_msg.linear_acceleration.z
+        ])
+
+        # Rotate acceleration to world frame and remove gravity
+        acc_world = rot_matrix @ acc_raw
+        acc_world[2] -= 9.81
+
+        # Remove bias
+        acc_corrected = {
+            'x': acc_world[0] - self.imu_bias['x'],
+            'y': acc_world[1] - self.imu_bias['y'],
+            'z': acc_world[2] - self.imu_bias['z'],
+            'time': current_time
+        }
+
+        # Add to accumulation buffer
+        self.imu_acc_buffer.append(acc_corrected)
+
+        # Initialize integration timer if needed
+        if self.last_integration_time is None:
+            self.last_integration_time = current_time
+            return
+
+        # Check if it's time to integrate (every 0.1 seconds)
+        if current_time - self.last_integration_time >= self.integration_interval:
+            self._perform_integration(current_time)
+
+    def _perform_integration(self, current_time):
+        """Perform integration at fixed intervals using accumulated data"""
+        if not self.imu_acc_buffer:
+            return
+
+        # Calculate average acceleration from buffer
+        acc_x = np.mean([a['x'] for a in self.imu_acc_buffer])
+        acc_y = np.mean([a['y'] for a in self.imu_acc_buffer])
+        acc_z = np.mean([a['z'] for a in self.imu_acc_buffer])
+
+        # Store buffer size before clearing
+        buffer_size = len(self.imu_acc_buffer)
+
+        # Clear buffer for next integration
+        self.imu_acc_buffer = []
+
+        # Calculate actual dt
+        dt = current_time - self.last_integration_time
+        self.last_integration_time = current_time
+
+        # Log integration rate
+        if not hasattr(self, 'integration_counter'):
+            self.integration_counter = 0
+        self.integration_counter += 1
+        if self.integration_counter % 10 == 0:  # Log every 1 second (10 * 0.1s)
+            self.get_logger().info(f"Integration Rate: {1.0/dt:.1f}Hz, Buffer averaged {buffer_size} samples")
+
+        # Higher threshold to filter out all noise in stationary state
+        # Based on observed noise levels: X~0.07, Y~0.3 m/s^2
+        if hasattr(self, 'imu_noise_std'):
+            threshold_x = max(0.3, 3 * self.imu_noise_std['x'])  # Increased to 0.3 m/s^2
+            threshold_y = max(0.3, 3 * self.imu_noise_std['y'])
+            threshold_z = max(0.3, 3 * self.imu_noise_std['z'])
+        else:
+            # Default threshold based on observed noise
+            threshold_x = threshold_y = threshold_z = 0.3  # m/s^2
+
+        if abs(acc_x) < threshold_x: acc_x = 0
+        if abs(acc_y) < threshold_y: acc_y = 0
+        if abs(acc_z) < threshold_z: acc_z = 0
+
+        # Check for stationary condition (all accelerations are zero after thresholding)
+        is_stationary = (acc_x == 0 and acc_y == 0 and acc_z == 0)
+
+        # Integrate acceleration to get velocity
+        self.imu_velocity['x'] += acc_x * dt
+        self.imu_velocity['y'] += acc_y * dt
+        self.imu_velocity['z'] += acc_z * dt
+
+        # Apply stronger damping when stationary
+        if is_stationary:
+            # Aggressive damping when stationary
+            damping = 0.95  # Stronger damping
+            # Also apply zero-velocity update if really still
+            speed = np.sqrt(self.imu_velocity['x']**2 +
+                          self.imu_velocity['y']**2 +
+                          self.imu_velocity['z']**2)
+            if speed < 0.05:  # If moving very slowly when stationary
+                self.imu_velocity['x'] *= 0.9  # Extra damping
+                self.imu_velocity['y'] *= 0.9
+                self.imu_velocity['z'] *= 0.9
+        else:
+            damping = 0.98  # Normal damping when moving
+
+        self.imu_velocity['x'] *= damping
+        self.imu_velocity['y'] *= damping
+        self.imu_velocity['z'] *= damping
+
+        # Zero out very small velocities - increased threshold
+        velocity_threshold = 0.01  # m/s (increased from 0.001)
+        if abs(self.imu_velocity['x']) < velocity_threshold: self.imu_velocity['x'] = 0
+        if abs(self.imu_velocity['y']) < velocity_threshold: self.imu_velocity['y'] = 0
+        if abs(self.imu_velocity['z']) < velocity_threshold: self.imu_velocity['z'] = 0
+
+        # Integrate velocity to get position
+        self.imu_path['x'] += self.imu_velocity['x'] * dt
+        self.imu_path['y'] += self.imu_velocity['y'] * dt
+        self.imu_path['z'] += self.imu_velocity['z'] * dt
+
+        # Store path history
+        self.imu_path_history.append({
+            'x': self.imu_path['x'],
+            'y': self.imu_path['y'],
+            'z': self.imu_path['z'],
+            'time': current_time
+        })
+
+        # Remove old data beyond duration
+        cutoff_time = current_time - self.imu_path_duration
+        while self.imu_path_history and self.imu_path_history[0]['time'] < cutoff_time:
+            self.imu_path_history.popleft()
+
+    def reset_imu_path(self):
+        """Reset IMU path integration"""
+        self.imu_path = {'x': 0.0, 'y': 0.0, 'z': 0.0}
+        self.imu_velocity = {'x': 0.0, 'y': 0.0, 'z': 0.0}
+        self.imu_path_history.clear()
+        self.imu_data_buffer.clear()
+        self.imu_acc_buffer = []
+        self.last_integration_time = None
+        if hasattr(self, 'integration_counter'):
+            self.integration_counter = 0
+
+    def calibrate_imu_bias(self):
+        """Start IMU bias calibration"""
+        self.imu_calibrating = True
+        self.calibration_samples = []
+        self.reset_imu_path()
+        self.get_logger().info("Starting IMU bias calibration...")
+
+    def get_imu_path_data(self):
+        """Get current IMU path data for visualization"""
+        if not self.imu_path_history:
+            return None
+
+        # Convert path history to list of points based on selected plane
+        path_points = []
+        for point in self.imu_path_history:
+            if self.imu_path_plane == 'xy':
+                path_points.append({'x': point['x'], 'y': point['y']})
+            elif self.imu_path_plane == 'xz':
+                path_points.append({'x': point['x'], 'y': point['z']})
+            elif self.imu_path_plane == 'yz':
+                path_points.append({'x': point['y'], 'y': point['z']})
+
+        # Calculate update rate info (now fixed at 10Hz)
+        update_rate = 10.0  # Fixed 10Hz integration rate
+
+        return {
+            'plane': self.imu_path_plane,
+            'path': path_points,
+            'current_position': self.imu_path,
+            'current_velocity': self.imu_velocity,
+            'duration': self.imu_path_duration,
+            'enabled': self.imu_path_enabled,
+            'update_rate_hz': update_rate,
+            'buffer_size': len(self.imu_acc_buffer)
+        }
 
 # Global ROS2 node and executor
 ros_node = None
@@ -338,6 +630,11 @@ recorder = RosbagRecorder()
 def index():
     """Serve the web interface"""
     return render_template('index.html')
+
+@app.route('/imu_timeseries')
+def imu_timeseries():
+    """Serve the IMU time series visualization page"""
+    return render_template('imu_timeseries.html')
 
 @app.route('/api/status', methods=['GET'])
 def status():
@@ -655,6 +952,8 @@ def list_available_topics():
 @app.route('/api/drivers/status', methods=['GET'])
 def driver_status():
     """Check status of IMU and Ouster drivers"""
+    global ros_node
+
     try:
         # Check Microstrain IMU driver
         imu_running = subprocess.run(
@@ -668,10 +967,38 @@ def driver_status():
             capture_output=True
         ).returncode == 0
 
-        # Get list of available topics
+        # Check if topics are actually publishing (receiving messages)
         imu_topics_active = False
         ouster_topics_active = False
+        imu_topic_list = []
+        ouster_topic_list = []
 
+        # Define timeout for considering a topic as active (seconds)
+        TOPIC_ACTIVE_TIMEOUT = 3.0
+
+        if ros_node:
+            current_time = ros_node.get_clock().now()
+
+            # Check IMU topics for recent messages
+            imu_topics_to_check = ['/imu/data', '/imu/data_raw']
+            for topic in imu_topics_to_check:
+                if topic in ros_node.message_timestamps:
+                    age = (current_time - ros_node.message_timestamps[topic]).nanoseconds / 1e9
+                    if age < TOPIC_ACTIVE_TIMEOUT:
+                        imu_topics_active = True
+                        imu_topic_list.append(topic)
+
+            # Check Ouster topics for recent messages
+            ouster_topics_to_check = ['/ouster/nearir_image', '/ouster/range_image',
+                                     '/ouster/reflec_image', '/ouster/signal_image']
+            for topic in ouster_topics_to_check:
+                if topic in ros_node.message_timestamps:
+                    age = (current_time - ros_node.message_timestamps[topic]).nanoseconds / 1e9
+                    if age < TOPIC_ACTIVE_TIMEOUT:
+                        ouster_topics_active = True
+                        ouster_topic_list.append(topic)
+
+        # Also get list of available topics from ros2 topic list for completeness
         try:
             result = subprocess.run(
                 ['bash', '-c', 'source /opt/ros/jazzy/setup.bash && source /home/kimghw/microstrain_ws/install/setup.bash && timeout 2 ros2 topic list'],
@@ -683,14 +1010,20 @@ def driver_status():
             if result.returncode == 0:
                 available_topics = result.stdout.strip().split('\n')
 
-                # Check if IMU topics exist
-                imu_topics_active = '/imu/data' in available_topics or '/imu/data_raw' in available_topics
+                # Add any additional IMU topics that exist
+                all_imu_topics = [t for t in available_topics if 'imu' in t.lower() or 'ekf' in t or 'mip' in t or 'gnss' in t.lower()]
+                for topic in all_imu_topics:
+                    if topic not in imu_topic_list:
+                        imu_topic_list.append(topic)
 
-                # Check if Ouster topics exist (check for any ouster topic)
-                ouster_topics_active = any('ouster' in topic for topic in available_topics)
+                # Add any additional Ouster topics that exist
+                all_ouster_topics = [t for t in available_topics if 'ouster' in t.lower()]
+                for topic in all_ouster_topics:
+                    if topic not in ouster_topic_list:
+                        ouster_topic_list.append(topic)
 
         except subprocess.TimeoutExpired:
-            # If timeout, assume topics are not available
+            # If timeout, use only the data we have from ros_node
             pass
 
         return jsonify({
@@ -699,12 +1032,14 @@ def driver_status():
                 "imu": {
                     "running": imu_running,
                     "publishing": imu_topics_active,
-                    "status": "active" if (imu_running and imu_topics_active) else ("started" if imu_running else "stopped")
+                    "status": "active" if imu_topics_active else ("started" if imu_running else "stopped"),
+                    "topics": sorted(imu_topic_list)
                 },
                 "ouster": {
                     "running": ouster_running,
                     "publishing": ouster_topics_active,
-                    "status": "active" if (ouster_running and ouster_topics_active) else ("started" if ouster_running else "stopped")
+                    "status": "active" if ouster_topics_active else ("started" if ouster_running else "stopped"),
+                    "topics": sorted(ouster_topic_list)
                 }
             }
         })
@@ -714,6 +1049,135 @@ def driver_status():
             "success": False,
             "error": str(e)
         }), 500
+
+@app.route('/api/imu/path/enable', methods=['POST'])
+def enable_imu_path():
+    """Enable IMU path tracking with bias calibration"""
+    global ros_node
+
+    if ros_node is None:
+        return jsonify({
+            "success": False,
+            "error": "ROS2 node not initialized"
+        }), 500
+
+    data = request.get_json() or {}
+    plane = data.get('plane', 'xy')
+    duration = data.get('duration', 5.0)
+
+    if plane not in ['xy', 'xz', 'yz']:
+        return jsonify({
+            "success": False,
+            "error": "Invalid plane. Must be 'xy', 'xz', or 'yz'"
+        }), 400
+
+    ros_node.imu_path_plane = plane
+    ros_node.imu_path_duration = duration
+
+    # Start calibration first
+    ros_node.calibrate_imu_bias()
+    ros_node.imu_path_enabled = True
+
+    return jsonify({
+        "success": True,
+        "message": f"IMU calibrating... Keep IMU still for 1 second",
+        "plane": plane,
+        "duration": duration,
+        "calibrating": True
+    })
+
+@app.route('/api/imu/path/disable', methods=['POST'])
+def disable_imu_path():
+    """Disable IMU path tracking"""
+    global ros_node
+
+    if ros_node is None:
+        return jsonify({
+            "success": False,
+            "error": "ROS2 node not initialized"
+        }), 500
+
+    ros_node.imu_path_enabled = False
+
+    return jsonify({
+        "success": True,
+        "message": "IMU path tracking disabled"
+    })
+
+@app.route('/api/imu/path/reset', methods=['POST'])
+def reset_imu_path():
+    """Reset IMU path data"""
+    global ros_node
+
+    if ros_node is None:
+        return jsonify({
+            "success": False,
+            "error": "ROS2 node not initialized"
+        }), 500
+
+    ros_node.reset_imu_path()
+
+    return jsonify({
+        "success": True,
+        "message": "IMU path reset"
+    })
+
+@app.route('/api/imu/path/data', methods=['GET'])
+def get_imu_path_data():
+    """Get current IMU path data"""
+    global ros_node
+
+    if ros_node is None:
+        return jsonify({
+            "success": False,
+            "error": "ROS2 node not initialized"
+        }), 500
+
+    path_data = ros_node.get_imu_path_data()
+
+    if path_data is None:
+        return jsonify({
+            "success": False,
+            "error": "No path data available"
+        }), 404
+
+    # Add calibration status
+    path_data['calibrating'] = ros_node.imu_calibrating
+    path_data['bias'] = dict(ros_node.imu_bias)
+
+    return jsonify({
+        "success": True,
+        "data": path_data
+    })
+
+@app.route('/api/imu_stream')
+def imu_stream():
+    """Stream IMU data as Server-Sent Events"""
+    global ros_node
+
+    def generate():
+        if ros_node is None:
+            yield f"data: {json.dumps({'error': 'ROS2 node not initialized'})}\n\n"
+            return
+
+        while True:
+            try:
+                # Get latest IMU message
+                msg_data = ros_node.get_latest_message('/imu/data')
+
+                if msg_data is not None:
+                    # Send the IMU data as JSON
+                    imu_data = msg_data['message']
+                    yield f"data: {json.dumps(imu_data)}\n\n"
+
+                # Sleep briefly to control update rate (around 20Hz)
+                time.sleep(0.05)
+
+            except Exception as e:
+                yield f"data: {json.dumps({'error': str(e)})}\n\n"
+                break
+
+    return Response(generate(), mimetype='text/event-stream')
 
 @app.route('/api/imu/calibrate_gyro', methods=['POST'])
 def calibrate_gyro():

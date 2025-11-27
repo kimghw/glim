@@ -15,6 +15,10 @@ topics:
   - "/ouster/points"
   - "/ouster/imu"
   - "/ouster/scan"
+  - "/ouster/nearir_image"
+  - "/ouster/range_image"
+  - "/ouster/reflec_image"
+  - "/ouster/signal_image"
 
   # Transform topics
   - "/tf"

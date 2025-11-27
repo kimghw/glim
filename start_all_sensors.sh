@@ -1,151 +1,146 @@
 #!/bin/bash
+# ============================================================
+# 센서 통합 실행 스크립트 (tmux 사용)
+# - Ouster 라이다 드라이버
+# - Microstrain IMU 드라이버
+# - 웹 서버
+# - 토픽 모니터링 (추가됨)
+# 모두 포그라운드에서 실행하며 로그 확인 가능
+# ============================================================
 
-#############################################
-# GLIM 센서 통합 시작 스크립트 (tmux)
-#############################################
+SESSION_NAME="sensors"
 
-SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+# 색상 정의
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+RED='\033[0;31m'
+NC='\033[0m' # No Color
 
-# 옵션 파싱
-AUTO_CALIBRATE=false
-if [[ "$1" == "--auto-calibrate" ]] || [[ "$1" == "-c" ]]; then
-    AUTO_CALIBRATE=true
-fi
-
-echo "========================================="
-echo "GLIM Sensor System Startup"
-echo "========================================="
+echo "============================================================"
+echo "  센서 통합 실행 스크립트"
+echo "============================================================"
 echo ""
 
-# 기존 세션 종료 확인
-if tmux has-session -t glim_sensors 2>/dev/null; then
-    echo "Existing 'glim_sensors' tmux session found."
-    read -p "Kill existing session and restart? (y/N): " -n 1 -r
-    echo
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
-        tmux kill-session -t glim_sensors
-        echo "Killed existing session."
-    else
-        echo "Aborted. Attach to existing session with:"
-        echo "  tmux attach -t glim_sensors"
-        exit 0
-    fi
+# tmux가 설치되어 있는지 확인
+if ! command -v tmux &> /dev/null; then
+    echo -e "${RED}❌ tmux가 설치되어 있지 않습니다.${NC}"
+    echo ""
+    echo "설치 방법:"
+    echo "  sudo apt install tmux"
+    echo ""
+    exit 1
 fi
 
-echo "Creating tmux session 'glim_sensors'..."
+# 이미 세션이 존재하는지 확인
+if tmux has-session -t $SESSION_NAME 2>/dev/null; then
+    echo -e "${YELLOW}⚠️  '$SESSION_NAME' 세션이 이미 실행 중입니다.${NC}"
+    echo ""
+    echo "선택:"
+    echo "  1) 기존 세션에 연결"
+    echo "  2) 기존 세션 종료 후 새로 시작"
+    echo "  3) 취소"
+    echo ""
+    read -p "선택 (1-3): " choice
+
+    case $choice in
+        1)
+            echo -e "${GREEN}✓ 기존 세션에 연결합니다...${NC}"
+            tmux attach -t $SESSION_NAME
+            exit 0
+            ;;
+        2)
+            echo -e "${YELLOW}⚠️  기존 세션을 종료합니다...${NC}"
+            tmux kill-session -t $SESSION_NAME
+            ;;
+        3)
+            echo "취소되었습니다."
+            exit 0
+            ;;
+        *)
+            echo -e "${RED}잘못된 선택입니다.${NC}"
+            exit 1
+            ;;
+    esac
+fi
+
+echo -e "${GREEN}🚀 센서 시스템을 시작합니다...${NC}"
 echo ""
 
-# 메인 tmux 세션 생성 (첫 번째 window: Microstrain IMU)
-tmux new-session -d -s glim_sensors -n microstrain
+# 경로 확인
+GLIM_DIR="/home/kimghw/glim"
+OUSTER_SCRIPT="$GLIM_DIR/ouster_setup/scripts/run_driver.sh"
+IMU_SCRIPT="$GLIM_DIR/microstrain_setup/start_microstrain.sh"
+WEB_SCRIPT="$GLIM_DIR/web/start_web.sh"
 
-# Window 0: Microstrain IMU
-tmux send-keys -t glim_sensors:0 "cd $SCRIPT_DIR/microstrain_setup" C-m
-tmux send-keys -t glim_sensors:0 "echo '=== Starting Microstrain IMU Driver ==='" C-m
-tmux send-keys -t glim_sensors:0 "./start_microstrain.sh" C-m
+# 스크립트 존재 여부 확인
+if [ ! -f "$OUSTER_SCRIPT" ]; then
+    echo -e "${RED}❌ Ouster 스크립트를 찾을 수 없습니다: $OUSTER_SCRIPT${NC}"
+    exit 1
+fi
 
-echo "✓ Window 0: Microstrain IMU driver starting..."
+if [ ! -f "$IMU_SCRIPT" ]; then
+    echo -e "${RED}❌ IMU 스크립트를 찾을 수 없습니다: $IMU_SCRIPT${NC}"
+    exit 1
+fi
 
-# 드라이버 초기화 대기
-echo "  Waiting for IMU driver to initialize (5 seconds)..."
-sleep 5
+if [ ! -f "$WEB_SCRIPT" ]; then
+    echo -e "${RED}❌ 웹 서버 스크립트를 찾을 수 없습니다: $WEB_SCRIPT${NC}"
+    exit 1
+fi
 
-# Window 1: Ouster LiDAR
-tmux new-window -t glim_sensors:1 -n ouster
-tmux send-keys -t glim_sensors:1 "cd $SCRIPT_DIR/ouster_setup" C-m
-tmux send-keys -t glim_sensors:1 "echo '=== Starting Ouster LiDAR Driver ==='" C-m
-tmux send-keys -t glim_sensors:1 "# Ouster driver command here (if available)" C-m
-tmux send-keys -t glim_sensors:1 "# ./start_ouster.sh" C-m
+# tmux 세션 생성 및 레이아웃 설정
+echo "  [1/4] tmux 세션 생성..."
 
-echo "✓ Window 1: Ouster LiDAR driver (ready, not started)"
+# 첫 번째 창: Ouster 드라이버
+tmux new-session -d -s $SESSION_NAME -n "Ouster" "cd $GLIM_DIR/ouster_setup/scripts && bash -c './run_driver.sh; echo 종료됨. Enter를 눌러 세션을 유지하거나 Ctrl+C로 종료하세요.; read'"
 
-# Window 2: Web Server
-tmux new-window -t glim_sensors:2 -n webserver
-tmux send-keys -t glim_sensors:2 "cd $SCRIPT_DIR/web" C-m
-tmux send-keys -t glim_sensors:2 "source venv/bin/activate" C-m
-tmux send-keys -t glim_sensors:2 "echo '=== Starting Web Server ==='" C-m
-tmux send-keys -t glim_sensors:2 "python3 app.py" C-m
+echo "  [2/4] Ouster 드라이버 창 생성 완료"
 
-echo "✓ Window 2: Web Server starting..."
+# 두 번째 창: IMU 드라이버
+tmux new-window -t $SESSION_NAME -n "IMU" "cd $GLIM_DIR/microstrain_setup && bash -c 'while true; do ./start_microstrain.sh; echo \"[$(date)] IMU 드라이버 종료. 5초 후 재시작...\"; sleep 5; done'"
 
-# 웹서버 초기화 대기
-echo "  Waiting for web server to initialize (3 seconds)..."
+echo "  [3/4] IMU 드라이버 창 생성 완료"
+
+# 세 번째 창: 웹 서버
+tmux new-window -t $SESSION_NAME -n "WebServer" "cd $GLIM_DIR/web && bash -c './start_web.sh; echo 종료됨. Enter를 눌러 세션을 유지하거나 Ctrl+C로 종료하세요.; read'"
+
+echo "  [4/4] 웹 서버 창 생성 완료"
+
+# 네 번째 창: 토픽 모니터링 (발행 여부 확인용)
+# 대시보드가 구독 여부로만 상태를 판단하는 문제를 보완하기 위해, 실제 토픽 발행(Publication) 여부를 확인하는 창을 추가합니다.
+# rostopic list 대신 주요 센서 토픽의 hz를 체크하여 실제 데이터 유입을 확인합니다.
+tmux new-window -t $SESSION_NAME -n "Monitor" "bash -c 'echo \"ROS 토픽 발행 상태(Hz)를 모니터링합니다...\"; sleep 5; rostopic hz /ouster/points /imu/data'"
+echo "  [+] 토픽 모니터링 창 생성 완료"
+
+echo ""
+
+# 첫 번째 창으로 이동
+tmux select-window -t $SESSION_NAME:0
+
+echo -e "${GREEN}✅ 모든 센서가 시작되었습니다!${NC}"
+echo ""
+echo "============================================================"
+echo "  tmux 사용법"
+echo "============================================================"
+echo "  창 전환:"
+echo "    Ctrl+B, 0    → Ouster 드라이버"
+echo "    Ctrl+B, 1    → IMU 드라이버"
+echo "    Ctrl+B, 2    → 웹 서버"
+echo "    Ctrl+B, 3    → 토픽 모니터링 (Monitor)"
+echo "    Ctrl+B, n    → 다음 창"
+echo "    Ctrl+B, p    → 이전 창"
+echo ""
+echo "  세션 제어:"
+echo "    Ctrl+B, d    → 세션 detach (백그라운드로)"
+echo "    tmux attach -t sensors    → 다시 연결"
+echo ""
+echo "  종료:"
+echo "    각 창에서 Ctrl+C    → 개별 프로세스 종료"
+echo "    tmux kill-session -t sensors    → 전체 종료"
+echo "============================================================"
+echo ""
+echo -e "${YELLOW}3초 후 tmux 세션에 연결합니다...${NC}"
 sleep 3
 
-# Window 3: Gyro Bias Calibration
-tmux new-window -t glim_sensors:3 -n gyro_calib
-tmux send-keys -t glim_sensors:3 "cd $SCRIPT_DIR/microstrain_setup" C-m
-tmux send-keys -t glim_sensors:3 "echo '=== IMU Gyro Bias Calibration ==='" C-m
-
-if [ "$AUTO_CALIBRATE" = true ]; then
-    # 자동 캘리브레이션
-    tmux send-keys -t glim_sensors:3 "echo 'AUTO-CALIBRATION MODE: Starting in 2 seconds...'" C-m
-    tmux send-keys -t glim_sensors:3 "echo 'IMPORTANT: Make sure IMU is completely STILL!'" C-m
-    tmux send-keys -t glim_sensors:3 "sleep 2 && ./calibrate_gyro.sh" C-m
-    echo "✓ Window 3: Gyro calibration auto-starting..."
-else
-    # 수동 캘리브레이션 (기본)
-    tmux send-keys -t glim_sensors:3 "echo 'IMPORTANT: Keep the IMU completely STILL!'" C-m
-    tmux send-keys -t glim_sensors:3 "echo 'Press Enter to start calibration, or Ctrl+C to skip'" C-m
-    tmux send-keys -t glim_sensors:3 "read -p 'Start gyro bias calibration? ' && ./calibrate_gyro.sh"
-    echo "✓ Window 3: Gyro calibration ready (press Enter to execute)"
-fi
-
-# Window 4: Control/Monitor
-tmux new-window -t glim_sensors:4 -n control
-tmux send-keys -t glim_sensors:4 "cd $SCRIPT_DIR" C-m
-tmux send-keys -t glim_sensors:4 "echo '=== GLIM Sensor Control Panel ==='" C-m
-tmux send-keys -t glim_sensors:4 "echo ''" C-m
-tmux send-keys -t glim_sensors:4 "echo 'Quick Commands:'" C-m
-tmux send-keys -t glim_sensors:4 "echo '  ros2 topic list            - List all topics'" C-m
-tmux send-keys -t glim_sensors:4 "echo '  ros2 topic hz /imu/data    - Check IMU frequency'" C-m
-tmux send-keys -t glim_sensors:4 "echo '  ros2 node list             - List all nodes'" C-m
-tmux send-keys -t glim_sensors:4 "echo '  curl http://localhost:5001/health - Check web server'" C-m
-tmux send-keys -t glim_sensors:4 "echo ''" C-m
-tmux send-keys -t glim_sensors:4 "echo 'Tmux Navigation:'" C-m
-tmux send-keys -t glim_sensors:4 "echo '  Ctrl+B, 0  - Microstrain IMU'" C-m
-tmux send-keys -t glim_sensors:4 "echo '  Ctrl+B, 1  - Ouster LiDAR'" C-m
-tmux send-keys -t glim_sensors:4 "echo '  Ctrl+B, 2  - Web Server'" C-m
-tmux send-keys -t glim_sensors:4 "echo '  Ctrl+B, 3  - Gyro Calibration'" C-m
-tmux send-keys -t glim_sensors:4 "echo '  Ctrl+B, 4  - Control Panel (this window)'" C-m
-tmux send-keys -t glim_sensors:4 "echo '  Ctrl+B, D  - Detach from session'" C-m
-tmux send-keys -t glim_sensors:4 "echo ''" C-m
-
-echo "✓ Window 4: Control panel ready"
-
-# 첫 번째 window로 이동 (Microstrain)
-tmux select-window -t glim_sensors:0
-
-echo ""
-echo "========================================="
-echo "✓ All sensors started successfully!"
-echo "========================================="
-echo ""
-echo "Tmux session 'glim_sensors' is running with:"
-echo "  Window 0: Microstrain IMU driver"
-echo "  Window 1: Ouster LiDAR driver"
-echo "  Window 2: Web Server (ROS2 node)"
-if [ "$AUTO_CALIBRATE" = true ]; then
-    echo "  Window 3: Gyro Calibration (auto-running)"
-else
-    echo "  Window 3: Gyro Calibration (manual, press Enter)"
-fi
-echo "  Window 4: Control Panel"
-echo ""
-echo "To attach to the session:"
-echo "  tmux attach -t glim_sensors"
-echo ""
-echo "To detach (while inside):"
-echo "  Ctrl+B, D"
-echo ""
-echo "To switch windows (while inside):"
-echo "  Ctrl+B, 0-4"
-echo ""
-echo "To kill the session:"
-echo "  tmux kill-session -t glim_sensors"
-echo ""
-echo "Usage:"
-echo "  $0              - Manual gyro calibration (default)"
-echo "  $0 --auto-calibrate  - Auto gyro calibration on startup"
-echo "  $0 -c           - Short form of --auto-calibrate"
-echo ""
-echo "========================================="
+# tmux 세션에 attach
+tmux attach -t $SESSION_NAME
