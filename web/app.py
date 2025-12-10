@@ -510,7 +510,7 @@ class RosbagRecorder:
         with open(self.state_file, 'w') as f:
             json.dump(state, f)
 
-    def start_recording(self, bag_name=None):
+    def start_recording(self, bag_name=None, extended_meta=None):
         """Start rosbag recording"""
         current_state = self.get_state()
 
@@ -544,6 +544,19 @@ class RosbagRecorder:
                 preexec_fn=os.setsid  # Create new session to isolate from parent
             )
 
+            # Save extended metadata to YAML file if provided
+            if extended_meta:
+                meta_file = os.path.join(bag_path, "extended_meta.yaml")
+                os.makedirs(bag_path, exist_ok=True)
+                meta_data = {
+                    "recording_name": bag_name,
+                    "start_time": datetime.now().isoformat(),
+                    "topics": TOPICS,
+                    "description": extended_meta
+                }
+                with open(meta_file, 'w') as f:
+                    yaml.dump(meta_data, f, default_flow_style=False, allow_unicode=True)
+
             # Save state with process group ID
             state = {
                 "recording": True,
@@ -552,7 +565,8 @@ class RosbagRecorder:
                 "bag_name": bag_name,
                 "bag_path": bag_path,
                 "start_time": datetime.now().isoformat(),
-                "topics": TOPICS
+                "topics": TOPICS,
+                "extended_meta": extended_meta
             }
             self._save_state(state)
 
@@ -636,6 +650,11 @@ def imu_timeseries():
     """Serve the IMU time series visualization page"""
     return render_template('imu_timeseries.html')
 
+@app.route('/position_tracking')
+def position_tracking():
+    """Serve the position tracking visualization page"""
+    return render_template('position_tracking.html')
+
 @app.route('/api/status', methods=['GET'])
 def status():
     """Get current recording status"""
@@ -647,7 +666,8 @@ def start():
     """Start recording"""
     data = request.get_json() or {}
     bag_name = data.get('bag_name')
-    result = recorder.start_recording(bag_name)
+    extended_meta = data.get('extended_meta')
+    result = recorder.start_recording(bag_name, extended_meta)
     return jsonify(result), 200 if result.get("success") else 400
 
 @app.route('/api/stop', methods=['POST'])
@@ -661,6 +681,59 @@ def recordings():
     """List all recordings"""
     bags = recorder.list_recordings()
     return jsonify({"recordings": bags, "count": len(bags)})
+
+@app.route('/api/recordings/<path:bag_name>', methods=['DELETE'])
+def delete_recording(bag_name):
+    """Delete a recording"""
+    try:
+        # Check if recording is currently active
+        state = recorder.get_state()
+        if state.get("recording") and state.get("bag_name") == bag_name:
+            return jsonify({
+                "success": False,
+                "error": "Cannot delete a recording that is currently in progress"
+            }), 400
+
+        bag_path = os.path.join(ROSBAG_DIR, bag_name)
+
+        if not os.path.exists(bag_path):
+            return jsonify({
+                "success": False,
+                "error": f"Recording '{bag_name}' not found"
+            }), 404
+
+        # Delete the rosbag directory
+        import shutil
+        shutil.rmtree(bag_path)
+
+        return jsonify({
+            "success": True,
+            "message": f"Successfully deleted '{bag_name}'"
+        })
+
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+@app.route('/api/disk_space', methods=['GET'])
+def disk_space():
+    """Get disk space information for rosbag directory"""
+    try:
+        import shutil
+        stat = shutil.disk_usage(ROSBAG_DIR)
+        return jsonify({
+            "total_bytes": stat.total,
+            "used_bytes": stat.used,
+            "free_bytes": stat.free,
+            "total_gb": round(stat.total / (1024**3), 2),
+            "used_gb": round(stat.used / (1024**3), 2),
+            "free_gb": round(stat.free / (1024**3), 2),
+            "percent_used": round((stat.used / stat.total) * 100, 1)
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/health', methods=['GET'])
 def health():
@@ -1350,6 +1423,91 @@ def init_ros2():
     ros_thread.start()
 
     print("ROS2 node initialized and spinning in background")
+
+@app.route('/api/position', methods=['GET'])
+def get_position():
+    """Get position tracking data from position tracker node"""
+    try:
+        position_file = '/tmp/position_tracking.json'
+        if os.path.exists(position_file):
+            with open(position_file, 'r') as f:
+                data = json.load(f)
+            return jsonify(data)
+        else:
+            return jsonify({
+                'position_history': [],
+                'current_position': {'x': 0, 'y': 0, 'z': 0},
+                'current_velocity': {'x': 0, 'y': 0, 'z': 0, 'speed': 0}
+            })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/rosbag/info/<path:bag_name>', methods=['GET'])
+def get_rosbag_info(bag_name):
+    """Get detailed information about a rosbag file"""
+    try:
+        bag_path = os.path.join(ROSBAG_DIR, bag_name)
+
+        if not os.path.exists(bag_path):
+            return jsonify({'error': 'Rosbag not found'}), 404
+
+        # Run ros2 bag info command
+        result = subprocess.run(
+            ['ros2', 'bag', 'info', bag_path],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+
+        if result.returncode != 0:
+            return jsonify({'error': f'Failed to get bag info: {result.stderr}'}), 500
+
+        # Parse the output
+        output = result.stdout
+        info = {
+            'raw_output': output,
+            'bag_name': bag_name,
+            'topics': []
+        }
+
+        # Extract topic information
+        lines = output.split('\n')
+        for i, line in enumerate(lines):
+            if 'Topic information:' in line:
+                # Parse topic lines
+                for topic_line in lines[i+1:]:
+                    if topic_line.strip().startswith('Topic:'):
+                        parts = topic_line.split('|')
+                        if len(parts) >= 4:
+                            topic_info = {
+                                'name': parts[0].replace('Topic:', '').strip(),
+                                'type': parts[1].replace('Type:', '').strip(),
+                                'count': int(parts[2].replace('Count:', '').strip()),
+                                'serialization': parts[3].replace('Serialization Format:', '').strip()
+                            }
+                            info['topics'].append(topic_info)
+                    elif topic_line.strip().startswith('Service:'):
+                        break
+            elif 'Duration:' in line:
+                info['duration'] = line.split('Duration:')[1].strip() if 'Duration:' in line else ''
+            elif 'Start:' in line:
+                info['start_time'] = line.split('Start:')[1].strip() if 'Start:' in line else ''
+            elif 'End:' in line:
+                info['end_time'] = line.split('End:')[1].strip() if 'End:' in line else ''
+            elif 'Messages:' in line:
+                try:
+                    info['total_messages'] = int(line.split('Messages:')[1].strip().split()[0])
+                except (ValueError, IndexError):
+                    info['total_messages'] = 0
+            elif 'Bag size:' in line:
+                info['size'] = line.split('Bag size:')[1].strip() if 'Bag size:' in line else ''
+
+        return jsonify(info)
+
+    except subprocess.TimeoutExpired:
+        return jsonify({'error': 'Timeout while getting bag info'}), 500
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
     # Ensure rosbag directory exists

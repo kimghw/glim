@@ -17,3 +17,22 @@ microstrain_inertial_driver:
 
     # Enable gyro bias estimation
     filter_enable_gyro_bias_estimation : True
+
+    # Enable filter data streaming
+    filter_data_rate: 100
+    filter_enable_ahrs: True
+
+    # Filter output data rates
+    filter_human_readable_status_data_rate: 1
+    filter_odometry_earth_data_rate: 50
+    filter_odometry_map_data_rate: 50
+
+    # Filter initialization
+    filter_auto_init: True
+    filter_reset_after_config: True
+
+    # Heading source (must be 0 for AR models)
+    filter_heading_source: 0
+
+    # Publish filter outputs
+    publish_filter: True
