@@ -1,0 +1,10 @@
+[Unit]
+Description=NVIDIA system resume actions
+After=suspend.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/nvidia-sleep.sh resume
+
+[Install]
+WantedBy=suspend.target

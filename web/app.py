@@ -518,8 +518,9 @@ class RosbagRecorder:
         if current_state.get("recording"):
             return {"success": False, "error": "Already recording", "state": current_state}
 
-        # Create rosbag directory if it doesn't exist
-        os.makedirs(self.rosbag_dir, exist_ok=True)
+        # Create rosbag directory if it doesn't exist (handle symlinks)
+        if not os.path.exists(self.rosbag_dir) and not os.path.islink(self.rosbag_dir):
+            os.makedirs(self.rosbag_dir, exist_ok=True)
 
         # Generate bag name if not provided
         if not bag_name:
@@ -544,18 +545,27 @@ class RosbagRecorder:
                 preexec_fn=os.setsid  # Create new session to isolate from parent
             )
 
+            # Wait a bit for rosbag to create the directory
+            import time
+            time.sleep(2)  # Give rosbag time to create the directory
+
             # Save extended metadata to YAML file if provided
             if extended_meta:
-                meta_file = os.path.join(bag_path, "extended_meta.yaml")
-                os.makedirs(bag_path, exist_ok=True)
-                meta_data = {
-                    "recording_name": bag_name,
-                    "start_time": datetime.now().isoformat(),
-                    "topics": TOPICS,
-                    "description": extended_meta
-                }
-                with open(meta_file, 'w') as f:
-                    yaml.dump(meta_data, f, default_flow_style=False, allow_unicode=True)
+                # Check if bag_path exists (created by rosbag)
+                if os.path.exists(bag_path):
+                    meta_file = os.path.join(bag_path, "extended_meta.yaml")
+                    meta_data = {
+                        "recording_name": bag_name,
+                        "start_time": datetime.now().isoformat(),
+                        "topics": TOPICS,
+                        "description": extended_meta
+                    }
+                    with open(meta_file, 'w') as f:
+                        yaml.dump(meta_data, f, default_flow_style=False, allow_unicode=True)
+                else:
+                    # If directory doesn't exist yet, save metadata in temp location
+                    # and move it later (you can implement a background task for this)
+                    print(f"Warning: Rosbag directory {bag_path} not yet created")
 
             # Save state with process group ID
             state = {
@@ -722,7 +732,26 @@ def disk_space():
     """Get disk space information for rosbag directory"""
     try:
         import shutil
-        stat = shutil.disk_usage(ROSBAG_DIR)
+        # Resolve symlink if it exists
+        target_dir = ROSBAG_DIR
+        if os.path.islink(ROSBAG_DIR):
+            target_dir = os.path.realpath(ROSBAG_DIR)
+
+        # Check if directory exists
+        if not os.path.exists(target_dir):
+            # Return default values if directory doesn't exist
+            return jsonify({
+                "total_bytes": 0,
+                "used_bytes": 0,
+                "free_bytes": 0,
+                "total_gb": 0,
+                "used_gb": 0,
+                "free_gb": 0,
+                "percent_used": 0,
+                "error": "Directory does not exist"
+            })
+
+        stat = shutil.disk_usage(target_dir)
         return jsonify({
             "total_bytes": stat.total,
             "used_bytes": stat.used,
@@ -730,7 +759,7 @@ def disk_space():
             "total_gb": round(stat.total / (1024**3), 2),
             "used_gb": round(stat.used / (1024**3), 2),
             "free_gb": round(stat.free / (1024**3), 2),
-            "percent_used": round((stat.used / stat.total) * 100, 1)
+            "percent_used": round((stat.used / stat.total) * 100, 1) if stat.total > 0 else 0
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -1510,14 +1539,65 @@ def get_rosbag_info(bag_name):
         return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
-    # Ensure rosbag directory exists
-    os.makedirs(ROSBAG_DIR, exist_ok=True)
+    # Ensure rosbag directory exists (handle symlinks)
+    if not os.path.exists(ROSBAG_DIR) and not os.path.islink(ROSBAG_DIR):
+        os.makedirs(ROSBAG_DIR, exist_ok=True)
 
     # Clean up any orphaned processes from previous run
     cleanup_orphaned_processes()
 
     # Initialize ROS2 node
     init_ros2()
+
+    # Get and display external IP
+    import socket
+
+    # Get local IPs
+    hostname = socket.gethostname()
+    local_ips = []
+
+    # Simple method to get local IPs
+    import subprocess
+    try:
+        result = subprocess.run(['ip', 'addr', 'show'], capture_output=True, text=True, timeout=2)
+        lines = result.stdout.split('\n')
+        for line in lines:
+            if 'inet ' in line and '127.0.0.1' not in line:
+                ip = line.strip().split()[1].split('/')[0]
+                local_ips.append(ip)
+    except:
+        # Fallback method
+        try:
+            local_ip = socket.gethostbyname(hostname)
+            if local_ip != '127.0.0.1':
+                local_ips.append(local_ip)
+        except:
+            pass
+
+    # Try to get external IP
+    external_ip = None
+    try:
+        import urllib.request
+        response = urllib.request.urlopen('https://api.ipify.org', timeout=3)
+        external_ip = response.read().decode('utf-8')
+    except:
+        # Try alternative service
+        try:
+            response = urllib.request.urlopen('https://ifconfig.me/ip', timeout=3)
+            external_ip = response.read().decode('utf-8').strip()
+        except:
+            pass
+
+    print("\n" + "="*60)
+    print("🌐 Web Server Access Information")
+    print("-"*60)
+    print(f"📍 Local access:    http://localhost:5001")
+    for ip in local_ips:
+        print(f"🏠 LAN access:      http://{ip}:5001")
+    if external_ip:
+        print(f"🌍 External IP:     {external_ip}")
+        print(f"   (Port forward 5001 to access from internet)")
+    print("="*60 + "\n")
 
     # Register cleanup handler
     atexit.register(cleanup_on_exit)

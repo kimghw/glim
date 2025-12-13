@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Position Tracking - IMU Integration</title>
+    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+    <style>
+        :root {
+            --primary-color: #007AFF;
+            --bg-color: #F2F2F7;
+            --card-bg: #FFFFFF;
+            --text-main: #1C1C1E;
+            --text-muted: #8E8E93;
+            --border-color: #E5E5EA;
+            --success-color: #34C759;
+            --danger-color: #FF3B30;
+            --warning-color: #FF9500;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: var(--bg-color);
+            color: var(--text-main);
+            -webkit-font-smoothing: antialiased;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        h1 {
+            font-size: 28px;
+            font-weight: 700;
+            margin: 0 0 20px 0;
+            color: var(--text-main);
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .warning {
+            background: #FFF8E1;
+            border: 1px solid #FFE082;
+            padding: 16px;
+            margin-bottom: 24px;
+            border-radius: 12px;
+            color: #B00020;
+            font-size: 15px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 16px;
+            margin-bottom: 24px;
+        }
+
+        .stat-card {
+            background: var(--card-bg);
+            color: var(--text-main);
+            padding: 20px;
+            border-radius: 18px;
+            box-shadow: 0 4px 24px rgba(0, 0, 0, 0.04);
+            border: none;
+        }
+
+        .stat-label {
+            font-size: 13px;
+            color: var(--text-muted);
+            margin-bottom: 8px;
+            text-transform: uppercase;
+            font-weight: 600;
+        }
+
+        .stat-value {
+            font-size: 24px;
+            font-weight: 600;
+            font-family: 'SF Mono', monospace;
+            color: var(--primary-color);
+        }
+
+        .stat-unit {
+            font-size: 14px;
+            color: var(--text-muted);
+            font-weight: 400;
+        }
+
+        .plot-container {
+            background: var(--card-bg);
+            padding: 24px;
+            border-radius: 18px;
+            margin-bottom: 24px;
+            box-shadow: 0 4px 24px rgba(0, 0, 0, 0.04);
+        }
+
+        .controls {
+            display: flex;
+            gap: 12px;
+            margin-bottom: 24px;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+
+        button {
+            padding: 12px 20px;
+            border: none;
+            border-radius: 12px;
+            font-size: 15px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .btn-primary {
+            background: var(--primary-color);
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background: #0062cc;
+        }
+
+        .btn-secondary {
+            background: #E5E5EA;
+            color: var(--text-main);
+        }
+
+        .btn-secondary:hover {
+            background: #D1D1D6;
+        }
+
+        select {
+            padding: 12px 16px;
+            border: 1px solid transparent;
+            border-radius: 12px;
+            font-size: 15px;
+            background-color: white;
+            color: var(--text-main);
+            box-shadow: 0 2px 6px rgba(0,0,0,0.05);
+        }
+
+        #status {
+            display: inline-flex;
+            align-items: center;
+            padding: 6px 12px;
+            border-radius: 100px;
+            font-size: 13px;
+            font-weight: 600;
+        }
+
+        .status-running {
+            background: #E8F8ED;
+            color: var(--success-color);
+        }
+
+        .status-stopped {
+            background: #FEECEC;
+            color: var(--danger-color);
+        }
+        
+        .back-link {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            margin-bottom: 20px;
+            color: var(--primary-color);
+            text-decoration: none;
+            font-weight: 500;
+            font-size: 15px;
+        }
+        
+        .back-link:hover {
+            text-decoration: underline;
+        }
+    </style>
+</head>
+<body>
+    <a href="/" class="back-link">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+        메인 페이지로 돌아가기
+    </a>
+
+    <div class="container">
+        <h1>
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="3 11 22 2 13 21 11 13 3 11"></polygon></svg>
+            Position Tracking - IMU Integration
+        </h1>
+        <p style="color: var(--text-muted); margin-bottom: 20px;">Real-time position estimation from IMU acceleration integration</p>
+
+        <div class="warning">
+            <strong>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
+                Note:
+            </strong>
+            Position estimated from IMU-only integration will drift over time due to error accumulation.
+            This is normal behavior without external position references (GPS, visual odometry, etc.).
+        </div>
+
+        <div class="controls">
+            <button class="btn-primary" onclick="resetPosition()">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"></path><path d="M3 3v5h5"></path></svg>
+                Reset Position
+            </button>
+            <button class="btn-secondary" onclick="togglePause()">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="4" width="4" height="16"></rect><rect x="14" y="4" width="4" height="16"></rect></svg>
+                Pause/Resume
+            </button>
+            <select id="planeSelect" onchange="changePlane()">
+                <option value="xy">XY Plane (Top View)</option>
+                <option value="xz">XZ Plane (Front View)</option>
+                <option value="yz">YZ Plane (Side View)</option>
+                <option value="3d">3D View</option>
+            </select>
+            <span id="status" class="status-running">Running</span>
+        </div>
+
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-label">X Position</div>
+                <div class="stat-value"><span id="pos-x">0.00</span> <span class="stat-unit">m</span></div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Y Position</div>
+                <div class="stat-value"><span id="pos-y">0.00</span> <span class="stat-unit">m</span></div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Z Position</div>
+                <div class="stat-value"><span id="pos-z">0.00</span> <span class="stat-unit">m</span></div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Speed</div>
+                <div class="stat-value"><span id="speed">0.00</span> <span class="stat-unit">m/s</span></div>
+            </div>
+        </div>
+
+        <div class="plot-container">
+            <div id="path-plot" style="width:100%; height:600px;"></div>
+        </div>
+
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-label">Velocity X</div>
+                <div class="stat-value"><span id="vel-x">0.00</span> <span class="stat-unit">m/s</span></div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Velocity Y</div>
+                <div class="stat-value"><span id="vel-y">0.00</span> <span class="stat-unit">m/s</span></div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Velocity Z</div>
+                <div class="stat-value"><span id="vel-z">0.00</span> <span class="stat-unit">m/s</span></div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Path Points</div>
+                <div class="stat-value"><span id="path-count">0</span></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let isPaused = false;
+        let currentPlane = 'xy';
+
+        function updateData() {
+            if (isPaused) {
+                setTimeout(updateData, 100);
+                return;
+            }
+
+            fetch('/api/position')
+                .then(response => response.json())
+                .then(data => {
+                    // Update stats
+                    document.getElementById('pos-x').textContent = data.current_position.x.toFixed(2);
+                    document.getElementById('pos-y').textContent = data.current_position.y.toFixed(2);
+                    document.getElementById('pos-z').textContent = data.current_position.z.toFixed(2);
+                    document.getElementById('speed').textContent = data.current_velocity.speed.toFixed(2);
+                    document.getElementById('vel-x').textContent = data.current_velocity.x.toFixed(2);
+                    document.getElementById('vel-y').textContent = data.current_velocity.y.toFixed(2);
+                    document.getElementById('vel-z').textContent = data.current_velocity.z.toFixed(2);
+                    document.getElementById('path-count').textContent = data.position_history.length;
+
+                    // Update plot
+                    updatePlot(data.position_history);
+                })
+                .catch(error => {
+                    console.error('Error fetching data:', error);
+                });
+
+            setTimeout(updateData, 100); // Update every 100ms
+        }
+
+        function updatePlot(history) {
+            if (history.length === 0) return;
+
+            let plotData;
+            let layout;
+
+            if (currentPlane === '3d') {
+                // 3D plot
+                const x = history.map(p => p.x);
+                const y = history.map(p => p.y);
+                const z = history.map(p => p.z);
+
+                plotData = [{
+                    type: 'scatter3d',
+                    mode: 'lines+markers',
+                    x: x,
+                    y: y,
+                    z: z,
+                    line: {
+                        color: 'rgb(102, 126, 234)',
+                        width: 3
+                    },
+                    marker: {
+                        size: 3,
+                        color: z,
+                        colorscale: 'Viridis',
+                        showscale: true
+                    }
+                }];
+
+                layout = {
+                    title: '3D Position Trajectory',
+                    scene: {
+                        xaxis: {title: 'X (m)'},
+                        yaxis: {title: 'Y (m)'},
+                        zaxis: {title: 'Z (m)'},
+                        camera: {
+                            eye: {x: 1.5, y: 1.5, z: 1.5}
+                        }
+                    },
+                    margin: {l: 0, r: 0, b: 0, t: 40}
+                };
+            } else {
+                // 2D plot
+                let x_data, y_data, x_label, y_label;
+
+                if (currentPlane === 'xy') {
+                    x_data = history.map(p => p.x);
+                    y_data = history.map(p => p.y);
+                    x_label = 'X Position (m)';
+                    y_label = 'Y Position (m)';
+                } else if (currentPlane === 'xz') {
+                    x_data = history.map(p => p.x);
+                    y_data = history.map(p => p.z);
+                    x_label = 'X Position (m)';
+                    y_label = 'Z Position (m)';
+                } else { // yz
+                    x_data = history.map(p => p.y);
+                    y_data = history.map(p => p.z);
+                    x_label = 'Y Position (m)';
+                    y_label = 'Z Position (m)';
+                }
+
+                plotData = [{
+                    type: 'scatter',
+                    mode: 'lines+markers',
+                    x: x_data,
+                    y: y_data,
+                    line: {
+                        color: 'rgb(102, 126, 234)',
+                        width: 3
+                    },
+                    marker: {
+                        size: 5,
+                        color: Array.from({length: x_data.length}, (_, i) => i),
+                        colorscale: 'Viridis',
+                        showscale: true,
+                        colorbar: {
+                            title: 'Time'
+                        }
+                    }
+                }];
+
+                layout = {
+                    title: `Position Trajectory - ${currentPlane.toUpperCase()} Plane`,
+                    xaxis: {title: x_label, zeroline: true},
+                    yaxis: {title: y_label, zeroline: true, scaleanchor: 'x'},
+                    margin: {l: 60, r: 40, b: 60, t: 40},
+                    hovermode: 'closest'
+                };
+            }
+
+            Plotly.react('path-plot', plotData, layout);
+        }
+
+        function resetPosition() {
+            if (confirm('Reset position tracking? This will restart the position tracker node.')) {
+                // In a real implementation, you'd send a reset command to the ROS node
+                alert('Position reset requested. Please restart the position tracker node manually.');
+            }
+        }
+
+        function togglePause() {
+            isPaused = !isPaused;
+            const status = document.getElementById('status');
+            if (isPaused) {
+                status.textContent = 'Paused';
+                status.className = 'status-stopped';
+            } else {
+                status.textContent = 'Running';
+                status.className = 'status-running';
+            }
+        }
+
+        function changePlane() {
+            currentPlane = document.getElementById('planeSelect').value;
+        }
+
+        // Start updating
+        updateData();
+    </script>
+</body>
+</html>

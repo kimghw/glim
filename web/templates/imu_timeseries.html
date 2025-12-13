@@ -1,0 +1,460 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IMU 시계열 데이터</title>
+    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+    <style>
+        :root {
+            --primary-color: #007AFF;
+            --bg-color: #F2F2F7;
+            --card-bg: #FFFFFF;
+            --text-main: #1C1C1E;
+            --text-muted: #8E8E93;
+            --border-color: #E5E5EA;
+            --success-color: #34C759;
+            --danger-color: #FF3B30;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: var(--bg-color);
+            color: var(--text-main);
+            -webkit-font-smoothing: antialiased;
+        }
+
+        .header {
+            background-color: var(--card-bg);
+            padding: 24px;
+            border-radius: 18px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 24px rgba(0, 0, 0, 0.04);
+        }
+
+        .header h1 {
+            margin: 0 0 16px 0;
+            color: var(--text-main);
+            font-size: 28px;
+            font-weight: 700;
+            letter-spacing: -0.02em;
+        }
+
+        .controls {
+            display: flex;
+            gap: 12px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+
+        .controls button {
+            padding: 10px 16px;
+            font-size: 15px;
+            font-weight: 600;
+            cursor: pointer;
+            background-color: var(--primary-color);
+            color: white;
+            border: none;
+            border-radius: 10px;
+            transition: all 0.2s;
+        }
+
+        .controls button:hover {
+            background-color: #0062cc;
+        }
+
+        .controls button:disabled {
+            background-color: var(--border-color);
+            color: var(--text-muted);
+            cursor: not-allowed;
+        }
+
+        .controls button.stop {
+            background-color: var(--danger-color);
+        }
+
+        .controls button.stop:hover {
+            background-color: #d73328;
+        }
+
+        .controls input {
+            padding: 8px 12px;
+            border: 1px solid transparent;
+            border-radius: 8px;
+            background: #F2F2F7;
+            font-size: 15px;
+            width: 80px;
+            color: var(--text-main);
+        }
+
+        .chart-container {
+            background-color: var(--card-bg);
+            padding: 24px;
+            border-radius: 18px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 24px rgba(0, 0, 0, 0.04);
+        }
+
+        .chart-container h2 {
+            margin-top: 0;
+            color: var(--text-main);
+            font-size: 20px;
+            font-weight: 600;
+            margin-bottom: 16px;
+        }
+
+        .plot {
+            width: 100%;
+            height: 400px;
+        }
+
+        .status {
+            display: inline-flex;
+            align-items: center;
+            padding: 6px 12px;
+            border-radius: 100px;
+            font-size: 13px;
+            font-weight: 600;
+            margin-left: auto;
+        }
+
+        .status.connected {
+            background-color: #E8F8ED;
+            color: var(--success-color);
+        }
+
+        .status.disconnected {
+            background-color: #FEECEC;
+            color: var(--danger-color);
+        }
+
+        .back-link {
+            display: inline-block;
+            margin-bottom: 20px;
+            color: var(--primary-color);
+            text-decoration: none;
+            font-weight: 500;
+            font-size: 15px;
+        }
+
+        .back-link:hover {
+            text-decoration: underline;
+        }
+
+        .data-info {
+            background-color: var(--card-bg);
+            border: 1px solid var(--border-color);
+            padding: 16px;
+            border-radius: 14px;
+            margin-bottom: 20px;
+            font-size: 15px;
+            color: var(--text-muted);
+            display: flex;
+            gap: 20px;
+            align-items: center;
+        }
+
+        .data-info strong {
+            color: var(--text-main);
+            font-weight: 600;
+        }
+    </style>
+</head>
+<body>
+    <a href="/" class="back-link" style="display: inline-flex; align-items: center; gap: 6px;">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+        메인 페이지로 돌아가기
+    </a>
+
+    <div class="header">
+        <h1>IMU 시계열 데이터 모니터링</h1>
+        <div class="controls">
+            <button id="startBtn" onclick="startStreaming()" style="display: inline-flex; align-items: center; gap: 6px;">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+                데이터 수신 시작
+            </button>
+            <button id="stopBtn" onclick="stopStreaming()" disabled class="stop" style="display: inline-flex; align-items: center; gap: 6px;">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="4" width="4" height="16"></rect><rect x="14" y="4" width="4" height="16"></rect></svg>
+                정지
+            </button>
+            <button onclick="clearData()" style="display: inline-flex; align-items: center; gap: 6px;">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"></path><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"></path><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"></path></svg>
+                데이터 초기화
+            </button>
+            <span>데이터 포인트 수: <input type="number" id="maxPoints" value="100" min="10" max="1000" style="width: 60px;"></span>
+            <span id="status" class="status disconnected">연결 안됨</span>
+        </div>
+    </div>
+
+    <div class="data-info">
+        <strong>업데이트 주기:</strong> <span id="updateRate">-</span> Hz |
+        <strong>최근 업데이트:</strong> <span id="lastUpdate">-</span>
+    </div>
+
+    <!-- 가속도 차트 -->
+    <div class="chart-container">
+        <h2>선형 가속도 (m/s²)</h2>
+        <div id="accelPlot" class="plot"></div>
+    </div>
+
+    <!-- 각속도 차트 -->
+    <div class="chart-container">
+        <h2>각속도 (rad/s)</h2>
+        <div id="gyroPlot" class="plot"></div>
+    </div>
+
+    <!-- 방향 차트 -->
+    <div class="chart-container">
+        <h2>방향 (Quaternion)</h2>
+        <div id="orientationPlot" class="plot"></div>
+    </div>
+
+    <!-- 회전 각도 차트 (각속도 적분) -->
+    <div class="chart-container">
+        <h2>회전 각도 (각속도 적분, degrees)</h2>
+        <div id="rotationAnglePlot" class="plot"></div>
+    </div>
+
+    <script>
+        let eventSource = null;
+        let accelData = {x: [], y: [], z: [], time: []};
+        let gyroData = {x: [], y: [], z: [], time: []};
+        let orientationData = {x: [], y: [], z: [], w: [], time: []};
+        let rotationAngleData = {x: [], y: [], z: [], time: []};  // 회전 각도 데이터
+        let currentRotation = {x: 0, y: 0, z: 0};  // 현재 회전 각도 (degrees)
+        let lastUpdateTime = null;
+        let updateCount = 0;
+
+        // Plotly 레이아웃 설정
+        const layoutConfig = {
+            margin: {t: 20, r: 20, b: 40, l: 60},
+            xaxis: {
+                title: '시간',
+                type: 'date',
+                rangeslider: {visible: false}
+            },
+            yaxis: {
+                title: '값'
+            },
+            showlegend: true,
+            legend: {
+                orientation: 'h',
+                y: 1.1
+            }
+        };
+
+        // 초기 차트 생성
+        function initCharts() {
+            // 가속도 차트
+            Plotly.newPlot('accelPlot', [
+                {x: [], y: [], name: 'X', type: 'scatter', mode: 'lines', line: {color: 'red'}},
+                {x: [], y: [], name: 'Y', type: 'scatter', mode: 'lines', line: {color: 'green'}},
+                {x: [], y: [], name: 'Z', type: 'scatter', mode: 'lines', line: {color: 'blue'}}
+            ], {...layoutConfig, yaxis: {title: '가속도 (m/s²)'}}, {responsive: true});
+
+            // 각속도 차트
+            Plotly.newPlot('gyroPlot', [
+                {x: [], y: [], name: 'X', type: 'scatter', mode: 'lines', line: {color: 'red'}},
+                {x: [], y: [], name: 'Y', type: 'scatter', mode: 'lines', line: {color: 'green'}},
+                {x: [], y: [], name: 'Z', type: 'scatter', mode: 'lines', line: {color: 'blue'}}
+            ], {...layoutConfig, yaxis: {title: '각속도 (rad/s)'}}, {responsive: true});
+
+            // 방향 차트
+            Plotly.newPlot('orientationPlot', [
+                {x: [], y: [], name: 'X', type: 'scatter', mode: 'lines', line: {color: 'red'}},
+                {x: [], y: [], name: 'Y', type: 'scatter', mode: 'lines', line: {color: 'green'}},
+                {x: [], y: [], name: 'Z', type: 'scatter', mode: 'lines', line: {color: 'blue'}},
+                {x: [], y: [], name: 'W', type: 'scatter', mode: 'lines', line: {color: 'orange'}}
+            ], {...layoutConfig, yaxis: {title: 'Quaternion'}}, {responsive: true});
+
+            // 회전 각도 차트 (각속도 적분)
+            Plotly.newPlot('rotationAnglePlot', [
+                {x: [], y: [], name: 'Roll (X)', type: 'scatter', mode: 'lines', line: {color: 'red'}},
+                {x: [], y: [], name: 'Pitch (Y)', type: 'scatter', mode: 'lines', line: {color: 'green'}},
+                {x: [], y: [], name: 'Yaw (Z)', type: 'scatter', mode: 'lines', line: {color: 'blue'}}
+            ], {...layoutConfig, yaxis: {title: '각도 (degrees)'}}, {responsive: true});
+        }
+
+        function startStreaming() {
+            if (eventSource) {
+                eventSource.close();
+            }
+
+            eventSource = new EventSource('/api/imu_stream');
+
+            document.getElementById('startBtn').disabled = true;
+            document.getElementById('stopBtn').disabled = false;
+            document.getElementById('status').textContent = '연결 중...';
+            document.getElementById('status').className = 'status disconnected';
+
+            eventSource.onopen = function() {
+                document.getElementById('status').textContent = '연결됨';
+                document.getElementById('status').className = 'status connected';
+            };
+
+            eventSource.onmessage = function(event) {
+                const data = JSON.parse(event.data);
+                updateData(data);
+            };
+
+            eventSource.onerror = function(error) {
+                console.error('EventSource error:', error);
+                document.getElementById('status').textContent = '연결 오류';
+                document.getElementById('status').className = 'status disconnected';
+                stopStreaming();
+            };
+        }
+
+        function stopStreaming() {
+            if (eventSource) {
+                eventSource.close();
+                eventSource = null;
+            }
+
+            document.getElementById('startBtn').disabled = false;
+            document.getElementById('stopBtn').disabled = true;
+            document.getElementById('status').textContent = '연결 안됨';
+            document.getElementById('status').className = 'status disconnected';
+        }
+
+        function updateData(data) {
+            const currentTime = new Date();
+            const maxPoints = parseInt(document.getElementById('maxPoints').value);
+
+            // 가속도 데이터 업데이트
+            if (data.linear_acceleration) {
+                accelData.x.push(data.linear_acceleration.x);
+                accelData.y.push(data.linear_acceleration.y);
+                accelData.z.push(data.linear_acceleration.z);
+                accelData.time.push(currentTime);
+
+                // 최대 포인트 수 유지
+                if (accelData.x.length > maxPoints) {
+                    accelData.x = accelData.x.slice(-maxPoints);
+                    accelData.y = accelData.y.slice(-maxPoints);
+                    accelData.z = accelData.z.slice(-maxPoints);
+                    accelData.time = accelData.time.slice(-maxPoints);
+                }
+
+                // 차트 업데이트
+                Plotly.update('accelPlot', {
+                    x: [accelData.time, accelData.time, accelData.time],
+                    y: [accelData.x, accelData.y, accelData.z]
+                }, [0, 1, 2]);
+            }
+
+            // 각속도 데이터 업데이트 및 회전 각도 적분
+            if (data.angular_velocity) {
+                gyroData.x.push(data.angular_velocity.x);
+                gyroData.y.push(data.angular_velocity.y);
+                gyroData.z.push(data.angular_velocity.z);
+                gyroData.time.push(currentTime);
+
+                // 각속도를 적분하여 회전 각도 계산 (rad/s -> degrees)
+                if (lastUpdateTime) {
+                    const dt = (currentTime - lastUpdateTime) / 1000; // 초 단위
+                    // 라디안을 도(degree)로 변환 (rad * 180 / π)
+                    currentRotation.x += (data.angular_velocity.x * dt) * (180 / Math.PI);
+                    currentRotation.y += (data.angular_velocity.y * dt) * (180 / Math.PI);
+                    currentRotation.z += (data.angular_velocity.z * dt) * (180 / Math.PI);
+                }
+
+                // 회전 각도 데이터 저장
+                rotationAngleData.x.push(currentRotation.x);
+                rotationAngleData.y.push(currentRotation.y);
+                rotationAngleData.z.push(currentRotation.z);
+                rotationAngleData.time.push(currentTime);
+
+                if (gyroData.x.length > maxPoints) {
+                    gyroData.x = gyroData.x.slice(-maxPoints);
+                    gyroData.y = gyroData.y.slice(-maxPoints);
+                    gyroData.z = gyroData.z.slice(-maxPoints);
+                    gyroData.time = gyroData.time.slice(-maxPoints);
+                }
+
+                if (rotationAngleData.x.length > maxPoints) {
+                    rotationAngleData.x = rotationAngleData.x.slice(-maxPoints);
+                    rotationAngleData.y = rotationAngleData.y.slice(-maxPoints);
+                    rotationAngleData.z = rotationAngleData.z.slice(-maxPoints);
+                    rotationAngleData.time = rotationAngleData.time.slice(-maxPoints);
+                }
+
+                Plotly.update('gyroPlot', {
+                    x: [gyroData.time, gyroData.time, gyroData.time],
+                    y: [gyroData.x, gyroData.y, gyroData.z]
+                }, [0, 1, 2]);
+
+                // 회전 각도 차트 업데이트
+                Plotly.update('rotationAnglePlot', {
+                    x: [rotationAngleData.time, rotationAngleData.time, rotationAngleData.time],
+                    y: [rotationAngleData.x, rotationAngleData.y, rotationAngleData.z]
+                }, [0, 1, 2]);
+            }
+
+            // 방향 데이터 업데이트
+            if (data.orientation) {
+                orientationData.x.push(data.orientation.x);
+                orientationData.y.push(data.orientation.y);
+                orientationData.z.push(data.orientation.z);
+                orientationData.w.push(data.orientation.w);
+                orientationData.time.push(currentTime);
+
+                if (orientationData.x.length > maxPoints) {
+                    orientationData.x = orientationData.x.slice(-maxPoints);
+                    orientationData.y = orientationData.y.slice(-maxPoints);
+                    orientationData.z = orientationData.z.slice(-maxPoints);
+                    orientationData.w = orientationData.w.slice(-maxPoints);
+                    orientationData.time = orientationData.time.slice(-maxPoints);
+                }
+
+                Plotly.update('orientationPlot', {
+                    x: [orientationData.time, orientationData.time, orientationData.time, orientationData.time],
+                    y: [orientationData.x, orientationData.y, orientationData.z, orientationData.w]
+                }, [0, 1, 2, 3]);
+            }
+
+            // 업데이트 정보 표시
+            updateCount++;
+            if (lastUpdateTime) {
+                const deltaTime = (currentTime - lastUpdateTime) / 1000; // 초 단위
+                const hz = (1 / deltaTime).toFixed(1);
+                document.getElementById('updateRate').textContent = hz;
+            }
+            lastUpdateTime = currentTime;
+            document.getElementById('lastUpdate').textContent = currentTime.toLocaleTimeString('ko-KR');
+        }
+
+        function clearData() {
+            accelData = {x: [], y: [], z: [], time: []};
+            gyroData = {x: [], y: [], z: [], time: []};
+            orientationData = {x: [], y: [], z: [], w: [], time: []};
+            rotationAngleData = {x: [], y: [], z: [], time: []};
+            currentRotation = {x: 0, y: 0, z: 0};  // 회전 각도 리셋
+            updateCount = 0;
+
+            // 차트 초기화
+            Plotly.update('accelPlot', {x: [[], [], []], y: [[], [], []]}, [0, 1, 2]);
+            Plotly.update('gyroPlot', {x: [[], [], []], y: [[], [], []]}, [0, 1, 2]);
+            Plotly.update('orientationPlot', {x: [[], [], [], []], y: [[], [], [], []]}, [0, 1, 2, 3]);
+            Plotly.update('rotationAnglePlot', {x: [[], [], []], y: [[], [], []]}, [0, 1, 2]);
+
+            document.getElementById('updateRate').textContent = '-';
+            document.getElementById('lastUpdate').textContent = '-';
+        }
+
+        // 페이지 로드 시 차트 초기화
+        window.onload = function() {
+            initCharts();
+        };
+
+        // 페이지 종료 시 연결 정리
+        window.onbeforeunload = function() {
+            if (eventSource) {
+                eventSource.close();
+            }
+        };
+    </script>
+</body>
+</html>

@@ -1,0 +1,10 @@
+[Unit]
+Description=NVIDIA system suspend actions
+Before=sleep.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/nvidia-sleep.sh suspend
+
+[Install]
+WantedBy=sleep.target
